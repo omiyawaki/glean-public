@@ -60,6 +60,10 @@ class Record:
     modified_at: Optional[date] = None
     doi: Optional[str] = None
     arxiv: Optional[str] = None
+    isbn: Optional[str] = None
+    pmid: Optional[str] = None
+    pmcid: Optional[str] = None
+    legacy_citekey: Optional[str] = None
     journal: Optional[str] = None
     volume: Optional[str] = None
     issue: Optional[str] = None

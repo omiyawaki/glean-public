@@ -26,11 +26,17 @@ CREATE TABLE IF NOT EXISTS records (
     type            TEXT,
     doi             TEXT,
     arxiv           TEXT,
+    isbn            TEXT,
+    pmid            TEXT,
+    pmcid           TEXT,
+    legacy_citekey  TEXT,
     added_at        TEXT,
     read            INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_records_doi ON records(doi) WHERE doi IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_records_year ON records(year);
+CREATE INDEX IF NOT EXISTS idx_records_legacy_citekey
+    ON records(legacy_citekey) WHERE legacy_citekey IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS authors (
     citekey TEXT NOT NULL,
@@ -165,7 +171,8 @@ class Index:
 
             conn.execute(
                 "INSERT INTO records(citekey, yaml_path, yaml_modified, title, year, "
-                "type, doi, arxiv, added_at, read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "type, doi, arxiv, isbn, pmid, pmcid, legacy_citekey, added_at, read) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.citekey,
                     str(self.library.path_for(record.citekey)),
@@ -175,6 +182,10 @@ class Index:
                     record.type,
                     record.doi,
                     record.arxiv,
+                    record.isbn,
+                    record.pmid,
+                    record.pmcid,
+                    record.legacy_citekey,
                     record.added_at.isoformat() if record.added_at else None,
                     1 if record.read else 0,
                 ),

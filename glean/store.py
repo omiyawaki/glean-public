@@ -24,7 +24,8 @@ from glean.schema import Attachment, Author, Record, validate
 
 CANONICAL_ORDER = [
     "citekey", "type", "title", "authors", "year",
-    "doi", "arxiv", "journal", "volume", "issue", "pages", "publisher", "url",
+    "doi", "arxiv", "isbn", "pmid", "pmcid", "legacy_citekey",
+    "journal", "volume", "issue", "pages", "publisher", "url",
     "abstract", "keywords", "attachments",
     "added_at", "modified_at", "read",
     "notes", "references", "source", "source_fetched_at",
@@ -50,6 +51,7 @@ def _yaml() -> YAML:
     y.allow_unicode = True
     y.indent(mapping=2, sequence=4, offset=2)
     y.width = 4096
+    y.representer.ignore_aliases = lambda *_: True
     return y
 
 
@@ -78,7 +80,10 @@ def _record_to_commented_map(r: Record) -> CommentedMap:
 
     m["year"] = r.year
 
-    for field_name in ("doi", "arxiv", "journal", "volume", "issue", "pages", "publisher", "url"):
+    for field_name in (
+        "doi", "arxiv", "isbn", "pmid", "pmcid", "legacy_citekey",
+        "journal", "volume", "issue", "pages", "publisher", "url",
+    ):
         v = getattr(r, field_name)
         if v is not None:
             m[field_name] = v
@@ -147,6 +152,10 @@ def _record_from_dict(d: dict) -> Record:
         modified_at=modified_at,
         doi=d.get("doi"),
         arxiv=str(d["arxiv"]) if d.get("arxiv") is not None else None,
+        isbn=d.get("isbn"),
+        pmid=str(d["pmid"]) if d.get("pmid") is not None else None,
+        pmcid=d.get("pmcid"),
+        legacy_citekey=d.get("legacy_citekey"),
         journal=d.get("journal"),
         volume=str(d["volume"]) if d.get("volume") is not None else None,
         issue=str(d["issue"]) if d.get("issue") is not None else None,
@@ -200,7 +209,9 @@ def attachment_filename(
         raise ValueError(f"unknown attachment kind: {kind!r}")
 
     families = [_ascii_family(a.family) for a in record.authors]
-    if len(families) == 1:
+    if not families:
+        author_part = "Anon"
+    elif len(families) == 1:
         author_part = families[0]
     elif len(families) == 2:
         author_part = f"{families[0]} and {families[1]}"

@@ -22,6 +22,10 @@ authors:                            # required, ordered
 year: 2024                          # required, int
 doi: 10.1175/JCLI-D-23-0456.1       # optional but strongly preferred
 arxiv: "2401.12345"                 # optional, string (preserves leading zeros)
+isbn: "9781009157896"               # optional, for books and chapters
+pmid: "34571220"                    # optional, PubMed ID
+pmcid: "PMC9286645"                 # optional, PubMed Central ID
+legacy_citekey: thuburn2017         # optional, pre-glean citekey for back-reference lookup
 journal: Journal of Climate         # optional
 volume: 37
 issue: 4
@@ -149,11 +153,17 @@ CREATE TABLE records (
   type            TEXT,
   doi             TEXT,
   arxiv           TEXT,
+  isbn            TEXT,
+  pmid            TEXT,
+  pmcid           TEXT,
+  legacy_citekey  TEXT,
   added_at        TEXT,
   read            INTEGER DEFAULT 0
 );
 CREATE INDEX idx_records_doi ON records(doi) WHERE doi IS NOT NULL;
 CREATE INDEX idx_records_year ON records(year);
+CREATE INDEX idx_records_legacy_citekey
+    ON records(legacy_citekey) WHERE legacy_citekey IS NOT NULL;
 
 CREATE TABLE authors (
   citekey TEXT, ord INTEGER, family TEXT, given TEXT,
