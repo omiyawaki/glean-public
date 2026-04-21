@@ -1,0 +1,13 @@
+citekey: Vallis2019AOFD
+type: book
+title: "Atmospheric and Oceanic Fluid Dynamics: Fundamentals and Large-Scale Circulation"
+authors:
+    - family: Vallis
+      given: Geoffrey
+year: 2019
+publisher: Cambridge University Press
+added_at: 2026-03-02
+modified_at: 2026-03-02
+read: true
+references:
+  - Sellers1965PhysicalClimatology

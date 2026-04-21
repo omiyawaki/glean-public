@@ -1,0 +1,14 @@
+citekey: Miyawaki2023Transformer
+type: preprint
+title: A transformer baseline for atmospheric fields
+authors:
+    - family: Miyawaki
+      given: Osamu
+year: 2023
+arxiv: '2301.04567'
+doi: 10.48550/arXiv.2301.04567
+url: https://arxiv.org/abs/2301.04567
+abstract: We report a transformer baseline for gridded atmospheric fields.
+keywords: [transformers, machine learning]
+added_at: 2023-02-10
+modified_at: 2023-02-10

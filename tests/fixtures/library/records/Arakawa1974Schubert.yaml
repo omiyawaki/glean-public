@@ -1,0 +1,18 @@
+citekey: Arakawa1974Schubert
+type: journal-article
+title: Interaction of a cumulus cloud ensemble with the large-scale environment
+authors:
+    - family: Arakawa
+      given: Akio
+    - family: Schubert
+      given: Wayne
+year: 1974
+doi: 10.1175/1520-0469(1974)031<0674:IOACCE>2.0.CO;2
+journal: Journal of the Atmospheric Sciences
+volume: '31'
+issue: '3'
+pages: 674-701
+keywords: [convection, cumulus, parameterization]
+added_at: 2024-09-15
+modified_at: 2024-09-15
+read: true

@@ -192,7 +192,7 @@ CREATE TABLE stubs (
   citekey      TEXT UNIQUE,        -- for synthetic-citekey stubs (no DOI)
   title        TEXT,
   year         INTEGER,
-  authors_flat TEXT,                -- "Miyawaki O; Vallis G"
+  authors_flat TEXT,                -- "Miyawaki Osamu; Vallis Geoffrey"
   CHECK (doi IS NOT NULL OR citekey IS NOT NULL)
 );
 
