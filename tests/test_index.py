@@ -9,7 +9,7 @@ def test_rebuild_populates_records(index: Index, lib: Library):
     index.rebuild()
     conn = index.connect()
     n = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
-    assert n == 4
+    assert n == 5
 
 
 def test_rebuild_populates_authors(index: Index):
@@ -101,7 +101,7 @@ def test_refresh_detects_deletions(index: Index, lib: Library):
     assert (added, updated, deleted) == (0, 0, 1)
     conn = index.connect()
     n = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
-    assert n == 3
+    assert n == 4
 
 
 def test_refresh_detects_additions(index: Index, lib: Library):

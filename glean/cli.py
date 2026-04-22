@@ -399,8 +399,102 @@ def cmd_import_bookends(args: argparse.Namespace) -> int:
 # ---------- deferred commands ----------
 
 def cmd_add(args: argparse.Namespace) -> int:
-    _err("glean add (DOI/URL resolver) is not yet wired. Lands with the graph layer in step 6c.")
-    return 5
+    from glean import _paper_intake
+    from glean.citekey import disambiguate, generate
+
+    raw = args.identifier
+    if not raw:
+        if not args.quiet:
+            _err("glean add: expected a DOI, arXiv ID, or URL")
+        return 6
+
+    doi = _paper_intake.normalize_identifier(raw)
+    if not doi:
+        if not args.quiet:
+            _err(f"could not resolve identifier: {raw!r}")
+        return 5
+
+    lib = _library()
+    idx = _index(lib)
+    conn = idx.connect()
+    # Duplicate check by DOI.
+    existing = conn.execute(
+        "SELECT citekey FROM records WHERE doi = ?", (doi,)
+    ).fetchone()
+    if existing:
+        if not args.quiet:
+            print(existing[0])
+        return 4
+
+    meta = _paper_intake.crossref_metadata(doi)
+    if not meta:
+        if not args.quiet:
+            _err(f"no metadata for {doi} (Crossref miss or network)")
+        return 5
+
+    authors_raw = meta.get("authors") or ""
+    authors: list[Author] = []
+    for line in authors_raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if "," in line:
+            fam, giv = line.split(",", 1)
+            authors.append(Author(family=fam.strip(), given=giv.strip() or None))
+        else:
+            authors.append(Author(family=line, given=None))
+
+    year_raw = meta.get("year") or ""
+    try:
+        year = int(year_raw)
+    except (TypeError, ValueError):
+        if not args.quiet:
+            _err(f"no usable year for {doi}")
+        return 6
+
+    title = (meta.get("title") or "").strip()
+    if not title or not authors:
+        if not args.quiet:
+            _err(f"insufficient metadata for {doi} (missing title or authors)")
+        return 6
+
+    is_arxiv = doi.startswith("10.48550/arXiv.")
+    record_type = "preprint" if is_arxiv else "journal-article"
+    arxiv = doi.split("arXiv.", 1)[1] if is_arxiv else None
+
+    existing_citekeys = {
+        row[0] for row in conn.execute("SELECT citekey FROM records")
+    }
+    base = generate(authors[0].family, year, title)
+    if not citekey_is_valid(base):
+        base = f"Record{abs(hash(doi)) % 1_000_000}"
+    citekey = disambiguate(base, existing_citekeys)
+
+    record = Record(
+        citekey=citekey,
+        type=record_type,
+        title=title,
+        authors=authors,
+        year=year,
+        doi=doi,
+        arxiv=arxiv,
+        journal=meta.get("journal") or None,
+        abstract=meta.get("abstract") or None,
+        source="crossref",
+        source_fetched_at=date.today(),
+    )
+    try:
+        validate(record)
+    except ValidationError as e:
+        if not args.quiet:
+            _err(f"validation error: {e}")
+        return 6
+
+    lib.save(record)
+    idx._upsert(record)
+    if not args.quiet:
+        print(citekey)
+    return 0
 
 
 def cmd_tui(args: argparse.Namespace) -> int:
@@ -413,9 +507,153 @@ def cmd_tui(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- graph ----------
+
+def cmd_graph_out(args: argparse.Namespace) -> int:
+    from glean.graph.queries import outgoing_for, Stub
+    lib = _library()
+    idx = _index(lib)
+    idx.connect()
+    if not lib.exists(args.citekey):
+        _err(f"not found: {args.citekey}")
+        return 1
+    for item in outgoing_for(lib, idx, args.citekey):
+        if isinstance(item, Stub):
+            title = item.title or "(no metadata yet; run: glean graph fetch)"
+            print(f"  [stub] {item.target:<50}  {title[:60]}")
+        else:
+            print(f"  [lib]  {item.citekey:<50}  {item.title[:60]}")
+    return 0
+
+
+def cmd_graph_in(args: argparse.Namespace) -> int:
+    from glean.graph.queries import incoming_for
+    lib = _library()
+    idx = _index(lib)
+    idx.connect()
+    if not lib.exists(args.citekey):
+        _err(f"not found: {args.citekey}")
+        return 1
+    r = lib.load(args.citekey)
+    for other in incoming_for(lib, idx, r):
+        print(f"  {other.citekey:<50}  {other.title[:60]}")
+    return 0
+
+
+def cmd_graph_suggest(args: argparse.Namespace) -> int:
+    from glean.graph.queries import unread_cited_by_read
+    lib = _library()
+    idx = _index(lib)
+    idx.connect()
+    results = unread_cited_by_read(lib, idx, min_citations=args.min_citations)
+    for stub, n in results:
+        title = stub.title or "(no metadata yet)"
+        print(f"  ×{n:<3} {stub.target:<45}  {title[:60]}")
+    return 0
+
+
+def _do_graph_fetch_one(citekey: str, lib: Library, idx: Index) -> int:
+    """Populate references: for a single record. 0=ok, 5=network, 1=not found, 6=no DOI."""
+    from glean.graph import openalex, crossref
+    if not lib.exists(citekey):
+        return 1
+    r = lib.load(citekey)
+    if not r.doi:
+        return 6
+    result = openalex.fetch(r.doi)
+    if result is None or not result.get("references"):
+        result = crossref.fetch(r.doi)
+    if result is None:
+        return 5
+    refs = result.get("references") or []
+    r.references = list(dict.fromkeys(refs))  # de-dup preserving order
+    r.source = "openalex" if openalex.fetch.__module__ else r.source or "openalex"
+    r.source_fetched_at = date.today()
+    lib.save(r)
+    idx._upsert(r)
+    return 0
+
+
+def cmd_graph_fetch(args: argparse.Namespace) -> int:
+    lib = _library()
+    idx = _index(lib)
+    idx.connect()
+    if args.all:
+        cutoff = None
+        if args.since:
+            cutoff = date.fromisoformat(args.since)
+        errors = 0
+        for r in lib.iter_records():
+            if not r.doi:
+                continue
+            if cutoff and r.source_fetched_at and r.source_fetched_at >= cutoff:
+                continue  # already fetched recently
+            rc = _do_graph_fetch_one(r.citekey, lib, idx)
+            if rc == 0:
+                print(f"  ok   {r.citekey}")
+            elif rc == 5:
+                errors += 1
+                print(f"  miss {r.citekey}", file=sys.stderr)
+        return 5 if errors else 0
+    else:
+        if not args.citekey:
+            _err("glean graph fetch: pass <citekey> or --all")
+            return 6
+        rc = _do_graph_fetch_one(args.citekey, lib, idx)
+        if rc == 1:
+            _err(f"not found: {args.citekey}")
+        elif rc == 5:
+            _err(f"network/resolve failure for {args.citekey}")
+        elif rc == 6:
+            _err(f"{args.citekey} has no DOI; cannot fetch")
+        return rc
+
+
+def cmd_graph_viz(args: argparse.Namespace) -> int:
+    from pyvis.network import Network
+    from glean.graph.queries import outgoing_for, Stub
+
+    lib = _library()
+    idx = _index(lib)
+    idx.connect()
+    if not lib.exists(args.citekey):
+        _err(f"not found: {args.citekey}")
+        return 1
+
+    depth = max(1, args.depth)
+    seen: set[str] = set()
+    frontier: list[tuple[str, int]] = [(args.citekey, 0)]
+    net = Network(height="750px", width="100%", directed=True, notebook=False)
+    while frontier:
+        node, d = frontier.pop(0)
+        if node in seen:
+            continue
+        seen.add(node)
+        try:
+            r = lib.load(node)
+            net.add_node(node, label=node, title=r.title, color="#4e79a7")
+        except FileNotFoundError:
+            net.add_node(node, label=node, color="#bab0ab")
+        if d >= depth:
+            continue
+        for item in outgoing_for(lib, idx, node):
+            if isinstance(item, Stub):
+                net.add_node(item.target, label=item.target[:30],
+                             title=item.title or "", color="#e15759")
+                net.add_edge(node, item.target)
+            else:
+                net.add_edge(node, item.citekey)
+                frontier.append((item.citekey, d + 1))
+    out_path = Path(args.output).expanduser() if args.output else Path(f"{args.citekey}.html")
+    net.write_html(str(out_path), open_browser=False, notebook=False)
+    print(str(out_path))
+    return 0
+
+
 def cmd_graph(args: argparse.Namespace) -> int:
-    _err("glean graph is not yet implemented. Lands in step 6c.")
-    return 1
+    # Routed via subparser; this is a fallback.
+    _err("glean graph: use `out`, `in`, `fetch`, `suggest`, or `viz`")
+    return 6
 
 
 # ---------- argparse wiring ----------
@@ -479,9 +717,32 @@ def _build_parser() -> argparse.ArgumentParser:
     tuip = sub.add_parser("tui", help="(deferred) Textual TUI")
     tuip.set_defaults(func=cmd_tui)
 
-    gp = sub.add_parser("graph", help="(deferred) citation graph operations")
-    gp.add_argument("subcommand", nargs="?")
-    gp.set_defaults(func=cmd_graph)
+    gp = sub.add_parser("graph", help="citation graph operations")
+    gpsub = gp.add_subparsers(dest="graph_sub", required=True)
+
+    gout = gpsub.add_parser("out", help="list outgoing references")
+    gout.add_argument("citekey")
+    gout.set_defaults(func=cmd_graph_out)
+
+    gin = gpsub.add_parser("in", help="list incoming citations")
+    gin.add_argument("citekey")
+    gin.set_defaults(func=cmd_graph_in)
+
+    gsug = gpsub.add_parser("suggest", help="unread papers cited by read ones")
+    gsug.add_argument("--min-citations", type=int, default=2)
+    gsug.set_defaults(func=cmd_graph_suggest)
+
+    gfetch = gpsub.add_parser("fetch", help="populate references: via OpenAlex/Crossref")
+    gfetch.add_argument("citekey", nargs="?")
+    gfetch.add_argument("--all", action="store_true")
+    gfetch.add_argument("--since", help="skip records fetched on or after this ISO date")
+    gfetch.set_defaults(func=cmd_graph_fetch)
+
+    gviz = gpsub.add_parser("viz", help="export a pyvis HTML graph")
+    gviz.add_argument("citekey")
+    gviz.add_argument("--depth", type=int, default=1)
+    gviz.add_argument("--output", help="output HTML path (default: <citekey>.html)")
+    gviz.set_defaults(func=cmd_graph_viz)
 
     ipp = sub.add_parser("import", help="batch import from external sources")
     ipsub = ipp.add_subparsers(dest="source", required=True)

@@ -1,0 +1,20 @@
+citekey: Wills2023Citation
+type: journal-article
+title: A review citing recent attention work
+authors:
+    - family: Wills
+      given: Robert C. J.
+year: 2023
+doi: 10.1175/JCLI-D-23-1234.5
+journal: Journal of Climate
+volume: '36'
+issue: '12'
+pages: 1-20
+added_at: 2024-01-15
+modified_at: 2024-01-15
+read: true
+references:
+  - 10.1175/JCLI-D-23-0456.1        # resolves to Miyawaki2024Attention (in library)
+  - 10.1175/1520-0469(1974)031<0674:IOACCE>2.0.CO;2   # resolves to Arakawa1974Schubert
+  - 10.1175/JAS-D-22-0011.1         # external DOI stub
+  - 10.1038/s41586-020-12345-6      # external DOI stub
