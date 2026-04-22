@@ -404,8 +404,13 @@ def cmd_add(args: argparse.Namespace) -> int:
 
 
 def cmd_tui(args: argparse.Namespace) -> int:
-    _err("glean tui is not yet implemented. Lands in step 6b.")
-    return 1
+    from glean.tui.app import GleanApp
+    lib = _library()
+    # Assume the index is current. Run `glean reindex` before launching if stale.
+    idx = _index(lib)
+    idx.connect()  # initialize the DB file without refreshing from YAMLs
+    GleanApp(lib, idx).run()
+    return 0
 
 
 def cmd_graph(args: argparse.Namespace) -> int:

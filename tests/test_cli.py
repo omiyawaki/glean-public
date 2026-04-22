@@ -122,6 +122,7 @@ def test_add_deferred(cli_env):
     assert rc == 5  # resolve/network failure is the stub exit code
 
 
-def test_tui_deferred(cli_env):
-    rc = main(["tui"])
-    assert rc == 1
+def test_tui_imports(cli_env):
+    # Don't actually launch the TUI (requires a TTY); just confirm the module loads.
+    from glean.tui.app import GleanApp
+    assert GleanApp is not None

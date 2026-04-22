@@ -112,7 +112,10 @@ class Index:
     def connect(self) -> sqlite3.Connection:
         if self._conn is None:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(self.db_path)
+            # check_same_thread=False so TUI background workers can read this
+            # connection. Writes happen on the main thread via the usual
+            # transactional helpers; concurrent access is read-dominant.
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.executescript(SCHEMA)
         return self._conn
