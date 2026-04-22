@@ -28,10 +28,13 @@ class Stub:
 
 
 def _resolve_target(index: Index, target: str) -> Optional[str]:
-    """Return a matching in-library citekey for this target, or None for a stub."""
+    """Return a matching in-library citekey for this target, or None for a stub.
+    DOI comparison is case-insensitive."""
     conn = index.connect()
     if looks_like_doi(target):
-        row = conn.execute("SELECT citekey FROM records WHERE doi = ?", (target,)).fetchone()
+        row = conn.execute(
+            "SELECT citekey FROM records WHERE lower(doi) = lower(?)", (target,)
+        ).fetchone()
     else:
         row = conn.execute("SELECT citekey FROM records WHERE citekey = ?", (target,)).fetchone()
     return row[0] if row else None

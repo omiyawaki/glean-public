@@ -155,6 +155,18 @@ def test_add_duplicate_returns_4(cli_env, monkeypatch, capsys):
     assert out == "Miyawaki2024Attention"
 
 
+def test_add_duplicate_detects_doi_case_mismatch(cli_env, monkeypatch, capsys):
+    # Migration stores DOIs as Bookends had them (often lowercase); Crossref
+    # returns the canonical uppercase form. Duplicate check must match across.
+    _patch_paper_intake(monkeypatch, doi="10.1175/jcli-d-23-0456.1")  # lowercase
+    main(["reindex", "--force"])
+    capsys.readouterr()
+    rc = main(["add", "10.1175/jcli-d-23-0456.1"])
+    out = capsys.readouterr().out.strip()
+    assert rc == 4
+    assert out == "Miyawaki2024Attention"
+
+
 def test_add_success(cli_env, monkeypatch, capsys):
     _patch_paper_intake(
         monkeypatch,
@@ -244,6 +256,122 @@ def test_graph_fetch_no_doi_returns_6(cli_env):
     main(["reindex", "--force"])
     rc = main(["graph", "fetch", "Vallis2019AOFD"])
     assert rc == 6
+
+
+# ---------- glean attach ----------
+
+def test_attach_adds_main(cli_env, tmp_path, capsys):
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(b"%PDF-1.4\nfake\n")
+    main(["reindex", "--force"])
+    capsys.readouterr()
+    rc = main(["attach", "Arakawa1974Schubert", str(pdf)])
+    assert rc == 0
+    r = cli_env.load("Arakawa1974Schubert")
+    mains = [a for a in r.attachments if a.kind == "main"]
+    assert len(mains) == 1
+    assert (cli_env.root / mains[0].path).exists()
+
+
+def test_attach_replaces_same_kind(cli_env, tmp_path):
+    first = tmp_path / "first.pdf"; first.write_bytes(b"first")
+    second = tmp_path / "second.pdf"; second.write_bytes(b"second")
+    main(["reindex", "--force"])
+    main(["attach", "Arakawa1974Schubert", str(first), "--kind", "main"])
+    r1 = cli_env.load("Arakawa1974Schubert")
+    first_path = cli_env.root / r1.attachments[-1].path
+    first_bytes = first_path.read_bytes()
+    main(["attach", "Arakawa1974Schubert", str(second), "--kind", "main"])
+    r2 = cli_env.load("Arakawa1974Schubert")
+    mains = [a for a in r2.attachments if a.kind == "main"]
+    assert len(mains) == 1
+    # Old main file should be gone (replaced semantics).
+    remaining_path = cli_env.root / mains[0].path
+    assert remaining_path.read_bytes() == b"second"
+
+
+def test_attach_supplement_does_not_replace_main(cli_env, tmp_path):
+    main_pdf = tmp_path / "main.pdf"; main_pdf.write_bytes(b"main")
+    si_pdf = tmp_path / "si.pdf"; si_pdf.write_bytes(b"si")
+    main(["reindex", "--force"])
+    main(["attach", "Arakawa1974Schubert", str(main_pdf), "--kind", "main"])
+    main(["attach", "Arakawa1974Schubert", str(si_pdf), "--kind", "supplement"])
+    r = cli_env.load("Arakawa1974Schubert")
+    kinds = sorted(a.kind for a in r.attachments)
+    assert kinds == ["main", "supplement"]
+
+
+def test_attach_missing_citekey_returns_1(cli_env, tmp_path):
+    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"x")
+    rc = main(["attach", "NoSuchKey", str(pdf)])
+    assert rc == 1
+
+
+def test_attach_missing_source_returns_2(cli_env):
+    main(["reindex", "--force"])
+    rc = main(["attach", "Arakawa1974Schubert", "/nonexistent/file.pdf"])
+    assert rc == 2
+
+
+def test_attach_move_removes_source(cli_env, tmp_path):
+    pdf = tmp_path / "orig.pdf"; pdf.write_bytes(b"x")
+    main(["reindex", "--force"])
+    rc = main(["attach", "Arakawa1974Schubert", str(pdf), "--move"])
+    assert rc == 0
+    assert not pdf.exists()
+
+
+# ---------- glean set ----------
+
+def test_set_updates_fields(cli_env):
+    main(["reindex", "--force"])
+    rc = main(["set", "Arakawa1974Schubert", "--set", "abstract=updated text",
+               "--set", "publisher=AMS"])
+    assert rc == 0
+    r = cli_env.load("Arakawa1974Schubert")
+    assert r.abstract == "updated text"
+    assert r.publisher == "AMS"
+
+
+def test_set_int_year(cli_env):
+    main(["reindex", "--force"])
+    rc = main(["set", "Arakawa1974Schubert", "--set", "year=1975"])
+    assert rc == 0
+    assert cli_env.load("Arakawa1974Schubert").year == 1975
+
+
+def test_set_bool_read(cli_env):
+    main(["reindex", "--force"])
+    rc = main(["set", "Miyawaki2024Attention", "--set", "read=true"])
+    assert rc == 0
+    assert cli_env.load("Miyawaki2024Attention").read is True
+
+
+def test_set_clear_field(cli_env):
+    main(["reindex", "--force"])
+    rc = main(["set", "Miyawaki2024Attention", "--clear", "abstract"])
+    assert rc == 0
+    assert cli_env.load("Miyawaki2024Attention").abstract is None
+
+
+def test_set_rejects_unknown_field(cli_env):
+    rc = main(["set", "Arakawa1974Schubert", "--set", "foo=bar"])
+    assert rc == 6
+
+
+def test_set_rejects_bad_year(cli_env):
+    rc = main(["set", "Arakawa1974Schubert", "--set", "year=nineteen-seventy"])
+    assert rc == 6
+
+
+def test_set_rejects_bad_type(cli_env):
+    rc = main(["set", "Arakawa1974Schubert", "--set", "type=blog-post"])
+    assert rc == 6
+
+
+def test_set_missing_citekey_returns_1(cli_env):
+    rc = main(["set", "NoSuchKey", "--set", "abstract=x"])
+    assert rc == 1
 
 
 def test_graph_fetch_populates_refs(cli_env, monkeypatch):

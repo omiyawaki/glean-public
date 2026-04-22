@@ -24,7 +24,10 @@ from typing import Iterable, Optional
 
 from glean.citekey import is_valid as citekey_is_valid
 from glean.index import Index
-from glean.schema import Attachment, Author, Record, ValidationError, validate
+from glean.schema import (
+    ATTACHMENT_KIND_ENUM, Attachment, Author, Record,
+    TYPE_ENUM, ValidationError, validate,
+)
 from glean.store import Library, attachment_filename
 
 
@@ -417,13 +420,13 @@ def cmd_add(args: argparse.Namespace) -> int:
     lib = _library()
     idx = _index(lib)
     conn = idx.connect()
-    # Duplicate check by DOI.
+    # Duplicate check by DOI (case-insensitive per RFC 3986 resolution rules:
+    # Bookends stores DOIs lowercase, Crossref often returns uppercase).
     existing = conn.execute(
-        "SELECT citekey FROM records WHERE doi = ?", (doi,)
+        "SELECT citekey FROM records WHERE lower(doi) = lower(?)", (doi,)
     ).fetchone()
     if existing:
-        if not args.quiet:
-            print(existing[0])
+        print(existing[0])
         return 4
 
     meta = _paper_intake.crossref_metadata(doi)
@@ -492,8 +495,7 @@ def cmd_add(args: argparse.Namespace) -> int:
 
     lib.save(record)
     idx._upsert(record)
-    if not args.quiet:
-        print(citekey)
+    print(citekey)
     return 0
 
 
@@ -504,6 +506,118 @@ def cmd_tui(args: argparse.Namespace) -> int:
     idx = _index(lib)
     idx.connect()  # initialize the DB file without refreshing from YAMLs
     GleanApp(lib, idx).run()
+    return 0
+
+
+# ---------- attach ----------
+
+def _unique_attachment_name(lib: Library, record: Record, kind: str) -> str:
+    """Return an attachment filename under the naming policy that doesn't
+    collide with any existing file in lib/attachments/."""
+    for i in [None, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
+        name = attachment_filename(record, kind=kind, collision_index=i)
+        if not (lib.root / "attachments" / name).exists():
+            return name
+    raise RuntimeError(f"too many attachment-name collisions for {record.citekey}")
+
+
+def cmd_attach(args: argparse.Namespace) -> int:
+    lib = _library()
+    idx = _index(lib)
+    idx.connect()
+    if not lib.exists(args.citekey):
+        _err(f"not found: {args.citekey}")
+        return 1
+    src = Path(args.path).expanduser()
+    if not src.is_file():
+        _err(f"source file not found: {src}")
+        return 2
+    r = lib.load(args.citekey)
+    kind = args.kind
+
+    # Remove any existing attachment of the same kind (both record and disk).
+    keep: list[Attachment] = []
+    for a in r.attachments:
+        if a.kind == kind:
+            old = lib.root / a.path
+            if old.exists():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        else:
+            keep.append(a)
+    r.attachments = keep
+
+    name = _unique_attachment_name(lib, r, kind)
+    dst = lib.root / "attachments" / name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    if args.move:
+        try:
+            src.unlink()
+        except OSError:
+            pass
+    r.attachments.append(Attachment(path=f"attachments/{name}", kind=kind))
+    lib.save(r)
+    idx._upsert(r)
+    print(str(dst))
+    return 0
+
+
+# ---------- set ----------
+
+_SETTABLE = {
+    "doi", "arxiv", "isbn", "pmid", "pmcid", "legacy_citekey",
+    "journal", "volume", "issue", "pages", "publisher", "url",
+    "abstract", "notes", "year", "title", "read", "type",
+}
+
+
+def cmd_set(args: argparse.Namespace) -> int:
+    lib = _library()
+    idx = _index(lib)
+    idx.connect()
+    if not lib.exists(args.citekey):
+        _err(f"not found: {args.citekey}")
+        return 1
+    r = lib.load(args.citekey)
+
+    for pair in args.set_ or []:
+        if "=" not in pair:
+            _err(f"--set expects key=value, got {pair!r}")
+            return 6
+        key, value = pair.split("=", 1)
+        if key not in _SETTABLE:
+            _err(f"field not settable: {key!r} (allowed: {sorted(_SETTABLE)})")
+            return 6
+        if key == "year":
+            try:
+                value = int(value)
+            except ValueError:
+                _err(f"year must be an integer, got {value!r}")
+                return 6
+        elif key == "read":
+            value = value.lower() in ("true", "1", "yes", "y")
+        elif key == "type":
+            if value not in TYPE_ENUM:
+                _err(f"invalid type {value!r}; allowed: {sorted(TYPE_ENUM)}")
+                return 6
+        setattr(r, key, value)
+
+    for key in args.clear or []:
+        if key not in _SETTABLE:
+            _err(f"field not settable: {key!r}")
+            return 6
+        setattr(r, key, False if key == "read" else None)
+
+    try:
+        validate(r)
+    except ValidationError as e:
+        _err(f"validation error: {e}")
+        return 6
+    lib.save(r)
+    idx._upsert(r)
     return 0
 
 
@@ -708,6 +822,22 @@ def _build_parser() -> argparse.ArgumentParser:
     rec = sub.add_parser("reconcile-attachments", help="verify attachment paths exist")
     rec.add_argument("--dry-run", action="store_true")
     rec.set_defaults(func=cmd_reconcile_attachments)
+
+    atp = sub.add_parser("attach", help="attach a file to a record")
+    atp.add_argument("citekey")
+    atp.add_argument("path")
+    atp.add_argument("--kind", default="main", choices=sorted(ATTACHMENT_KIND_ENUM))
+    atp.add_argument("--move", action="store_true",
+                     help="delete the source file after copy")
+    atp.set_defaults(func=cmd_attach)
+
+    setp = sub.add_parser("set", help="set or clear fields on a record")
+    setp.add_argument("citekey")
+    setp.add_argument("--set", dest="set_", action="append", metavar="key=value",
+                      help="set a field; repeatable")
+    setp.add_argument("--clear", action="append", metavar="field",
+                      help="null out a field; repeatable")
+    setp.set_defaults(func=cmd_set)
 
     addp = sub.add_parser("add", help="(deferred) resolve DOI/URL and add record")
     addp.add_argument("identifier", nargs="?")
