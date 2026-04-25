@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.miyawaki.glean-web</string>
+
+    <!-- HTTP API for the macOS frontend (glean.app). Read-only library
+         endpoints (/api/papers, /api/papers/<citekey>) backed by the
+         SQLite index, refreshed every 60s in a background thread.
+         Binds 0.0.0.0:8766 — tailnet-only via the user's network
+         posture, no auth, sibling to paper_intake's :8765 backlog
+         server. -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/USERNAME/tools/glean/.venv/bin/glean</string>
+        <string>serve</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/Users/USERNAME/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/USERNAME</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/USERNAME/tools/glean</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/Library/Logs/glean-web.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/Library/Logs/glean-web.stderr.log</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

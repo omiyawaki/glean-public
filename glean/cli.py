@@ -509,6 +509,12 @@ def cmd_tui(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    from glean.web import serve
+    serve(host=args.host, port=args.port)
+    return 0
+
+
 # ---------- attach ----------
 
 def _unique_attachment_name(lib: Library, record: Record, kind: str) -> str:
@@ -846,6 +852,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     tuip = sub.add_parser("tui", help="(deferred) Textual TUI")
     tuip.set_defaults(func=cmd_tui)
+
+    srvp = sub.add_parser("serve", help="run the HTTP API for the macOS frontend")
+    srvp.add_argument("--host", default="0.0.0.0")
+    srvp.add_argument("--port", type=int, default=8766)
+    srvp.set_defaults(func=cmd_serve)
 
     gp = sub.add_parser("graph", help="citation graph operations")
     gpsub = gp.add_subparsers(dest="graph_sub", required=True)
