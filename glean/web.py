@@ -15,6 +15,7 @@ from __future__ import annotations
 import http.server
 import json
 import socketserver
+import sys
 import threading
 import time
 from pathlib import Path
@@ -24,6 +25,15 @@ from glean.store import Library, loads
 
 
 REFRESH_INTERVAL_S = 60
+
+
+def _refresh_index(idx: Index, *, phase: str) -> bool:
+    try:
+        idx.refresh()
+    except Exception as exc:
+        print(f"glean web {phase} refresh failed: {exc}", file=sys.stderr, flush=True)
+        return False
+    return True
 
 
 def _list_papers(idx: Index) -> dict:
@@ -89,10 +99,7 @@ def _start_refresh_thread(idx: Index) -> None:
     API serves fresh data without paying refresh() cost on each request."""
     def loop() -> None:
         while True:
-            try:
-                idx.refresh()
-            except Exception:
-                pass
+            _refresh_index(idx, phase="background")
             time.sleep(REFRESH_INTERVAL_S)
     threading.Thread(target=loop, daemon=True, name="glean-web-refresh").start()
 
@@ -100,7 +107,7 @@ def _start_refresh_thread(idx: Index) -> None:
 def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
     lib = Library(Path.home() / "Documents" / "glean")
     idx = Index(lib, Path.home() / "Library" / "Caches" / "glean" / "index.sqlite")
-    idx.refresh()  # ensure a fresh index at startup
+    _refresh_index(idx, phase="startup")
     _start_refresh_thread(idx)
 
     class Handler(http.server.BaseHTTPRequestHandler):
