@@ -19,14 +19,14 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.scalarstring import LiteralScalarString
 
-from glean.schema import Attachment, Author, Record, validate
+from glean.schema import Attachment, Author, Record, normalize_tag, normalize_tags, validate
 
 
 CANONICAL_ORDER = [
     "citekey", "type", "title", "authors", "year",
     "doi", "arxiv", "isbn", "pmid", "pmcid", "legacy_citekey",
     "journal", "volume", "issue", "pages", "publisher", "url",
-    "abstract", "keywords", "attachments",
+    "abstract", "keywords", "tags", "attachments",
     "added_at", "modified_at", "read",
     "notes", "references", "source", "source_fetched_at",
 ]
@@ -96,6 +96,11 @@ def _record_to_commented_map(r: Record) -> CommentedMap:
         kw.fa.set_flow_style()
         m["keywords"] = kw
 
+    if r.tags:
+        tags = CommentedSeq(r.tags)
+        tags.fa.set_flow_style()
+        m["tags"] = tags
+
     if r.attachments:
         atts = CommentedSeq()
         for a in r.attachments:
@@ -164,6 +169,7 @@ def _record_from_dict(d: dict) -> Record:
         url=d.get("url"),
         abstract=d.get("abstract"),
         keywords=list(d.get("keywords") or []),
+        tags=normalize_tags(list(d.get("tags") or [])),
         attachments=attachments,
         read=bool(d.get("read", False)),
         notes=d.get("notes"),
@@ -174,6 +180,7 @@ def _record_from_dict(d: dict) -> Record:
 
 
 def dumps(record: Record) -> str:
+    record.tags = normalize_tags(record.tags)
     validate(record)
     buf = io.StringIO()
     _yaml().dump(_record_to_commented_map(record), buf)

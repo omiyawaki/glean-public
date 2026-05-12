@@ -26,7 +26,7 @@ from glean.citekey import is_valid as citekey_is_valid
 from glean.index import Index
 from glean.schema import (
     ATTACHMENT_KIND_ENUM, Attachment, Author, Record,
-    TYPE_ENUM, ValidationError, validate,
+    TYPE_ENUM, ValidationError, normalize_tag, validate,
 )
 from glean.store import Library, attachment_filename
 
@@ -93,6 +93,8 @@ def cmd_info(args: argparse.Namespace) -> int:
         if v: print(f"  {key}: {v}")
     if r.keywords:
         print(f"  keywords: {', '.join(r.keywords)}")
+    if r.tags:
+        print(f"  tags: {', '.join(r.tags)}")
     if r.attachments:
         print("  attachments:")
         for a in r.attachments:
@@ -246,6 +248,15 @@ def cmd_ls(args: argparse.Namespace) -> int:
         params.append(int(args.year))
     if args.unread:
         wheres.append("r.read = 0")
+    if args.tag:
+        try:
+            tag = normalize_tag(args.tag)
+        except ValidationError as e:
+            _err(f"invalid tag: {e}")
+            return 6
+        joins.append("JOIN tags t ON t.citekey = r.citekey")
+        wheres.append("t.tag = ?")
+        params.append(tag)
     if joins:
         sql.extend(joins)
     if wheres:
@@ -269,7 +280,7 @@ def _export_json(records: Iterable[Record]) -> str:
             "legacy_citekey": r.legacy_citekey,
             "journal": r.journal, "volume": r.volume, "issue": r.issue,
             "pages": r.pages, "publisher": r.publisher, "url": r.url,
-            "abstract": r.abstract, "keywords": r.keywords,
+            "abstract": r.abstract, "keywords": r.keywords, "tags": r.tags,
             "attachments": [{"path": a.path, "kind": a.kind} for a in r.attachments],
             "added_at": r.added_at.isoformat() if r.added_at else None,
             "modified_at": r.modified_at.isoformat() if r.modified_at else None,
@@ -627,6 +638,50 @@ def cmd_set(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- tag ----------
+
+def _mutate_tag(args: argparse.Namespace, *, add: bool) -> int:
+    lib = _library()
+    idx = _index(lib)
+    idx.connect()
+    if not lib.exists(args.citekey):
+        _err(f"not found: {args.citekey}")
+        return 1
+    try:
+        tag = normalize_tag(args.tag)
+    except ValidationError as e:
+        _err(f"invalid tag: {e}")
+        return 6
+
+    r = lib.load(args.citekey)
+    if add:
+        if tag in r.tags:
+            print(f"{r.citekey} already has tag {tag}")
+            return 0
+        r.tags.append(tag)
+        lib.save(r)
+        idx._upsert(r)
+        print(f"added tag {tag} to {r.citekey}")
+        return 0
+
+    if tag not in r.tags:
+        print(f"{r.citekey} does not have tag {tag}")
+        return 0
+    r.tags = [existing for existing in r.tags if existing != tag]
+    lib.save(r)
+    idx._upsert(r)
+    print(f"removed tag {tag} from {r.citekey}")
+    return 0
+
+
+def cmd_tag_add(args: argparse.Namespace) -> int:
+    return _mutate_tag(args, add=True)
+
+
+def cmd_tag_rm(args: argparse.Namespace) -> int:
+    return _mutate_tag(args, add=False)
+
+
 # ---------- graph ----------
 
 def cmd_graph_out(args: argparse.Namespace) -> int:
@@ -812,6 +867,7 @@ def _build_parser() -> argparse.ArgumentParser:
     lsp = sub.add_parser("ls", help="list records with optional filters")
     lsp.add_argument("--year")
     lsp.add_argument("--author", help="family name, case-insensitive exact match")
+    lsp.add_argument("--tag", help="tag slug, normalized before matching")
     lsp.add_argument("--unread", action="store_true")
     lsp.set_defaults(func=cmd_ls)
 
@@ -844,6 +900,17 @@ def _build_parser() -> argparse.ArgumentParser:
     setp.add_argument("--clear", action="append", metavar="field",
                       help="null out a field; repeatable")
     setp.set_defaults(func=cmd_set)
+
+    tagp = sub.add_parser("tag", help="add or remove tags on a record")
+    tagsub = tagp.add_subparsers(dest="tag_sub", required=True)
+    tagadd = tagsub.add_parser("add", help="add a tag to a record")
+    tagadd.add_argument("citekey")
+    tagadd.add_argument("tag")
+    tagadd.set_defaults(func=cmd_tag_add)
+    tagrm = tagsub.add_parser("rm", aliases=["remove"], help="remove a tag from a record")
+    tagrm.add_argument("citekey")
+    tagrm.add_argument("tag")
+    tagrm.set_defaults(func=cmd_tag_rm)
 
     addp = sub.add_parser("add", help="(deferred) resolve DOI/URL and add record")
     addp.add_argument("identifier", nargs="?")

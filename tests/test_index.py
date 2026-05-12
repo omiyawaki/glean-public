@@ -32,6 +32,21 @@ def test_rebuild_populates_attachments(index: Index):
     assert [r[0] for r in rows] == ["main", "supplement"]
 
 
+def test_rebuild_populates_tags(index: Index, lib: Library):
+    r = lib.load("Miyawaki2024Attention")
+    r.tags = ["proj-a", "upper-troposphere"]
+    lib.save(r, today=date(2026, 4, 20))
+
+    index.rebuild()
+
+    conn = index.connect()
+    rows = conn.execute(
+        "SELECT tag FROM tags WHERE citekey = ? ORDER BY tag",
+        ("Miyawaki2024Attention",),
+    ).fetchall()
+    assert [r[0] for r in rows] == ["proj-a", "upper-troposphere"]
+
+
 def test_search_by_title(index: Index):
     index.rebuild()
     hits = index.search("convection")
@@ -46,6 +61,17 @@ def test_search_by_author_given_name(index: Index):
     citekeys = {h[0] for h in hits}
     assert "Miyawaki2024Attention" in citekeys
     assert "Miyawaki2023Transformer" in citekeys
+
+
+def test_search_by_tag(index: Index, lib: Library):
+    r = lib.load("Miyawaki2024Attention")
+    r.tags = ["proj-a"]
+    lib.save(r, today=date(2026, 4, 20))
+
+    index.rebuild()
+
+    hits = index.search("proj-a")
+    assert [h[0] for h in hits] == ["Miyawaki2024Attention"]
 
 
 def test_outgoing_resolves_doi_and_citekey(index: Index):

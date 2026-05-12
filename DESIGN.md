@@ -35,6 +35,7 @@ url: https://journals.ametsoc.org/...
 abstract: |
   Free-form multi-line text.
 keywords: [attention, convection, transformers]
+tags: [proj-a, upper-troposphere]      # optional, normalized lowercase ASCII slugs
 attachments:                        # optional, list; main is the primary PDF
   - path: attachments/Miyawaki (2024) Attention and convection.pdf
     kind: main
@@ -55,6 +56,8 @@ source_fetched_at: 2026-04-18       # optional, ISO date
 Enum for `type`: `journal-article`, `preprint`, `book`, `chapter`, `thesis`, `report`, `conference`, `other`. Same names OpenAlex uses, with `preprint` carved out because it matters for supersession logic that paper_intake already does. OpenAlex itself has no `preprint` type, so the importer and graph fetcher detect preprints by DOI prefix (`10.48550/arXiv.*`, `10.21203/*`, `10.1101/*` for bioRxiv, and so on). This logic already lives in `paper_intake/resolver.py` and will be reused, not reimplemented.
 
 Required fields are the six that every record must have to be useful: `citekey`, `type`, `title`, `authors`, `year`, `added_at`. `modified_at` is also required but the store maintains it automatically. Everything else is optional and simply absent when unknown. The importer from Bookends will populate what it can and leave the rest out rather than emitting empty strings.
+
+Tags are first-class labels for project and topic grouping. They are stored in `tags:` as a list of lowercase ASCII slugs, normalized by lowercasing, stripping accents, converting non-alphanumeric runs to `-`, and de-duplicating while preserving first-seen order. Examples: `proj-a`, `upper-troposphere`, `field-data`. Missing `tags:` means the record has no tags.
 
 Attachment kinds: `main`, `supplement`, `erratum`, `corrigendum`, `slides`, `response`, `dataset`, `other`. At most one `main` per record. See the "Attachment filenames" section for the naming policy.
 
@@ -178,6 +181,13 @@ CREATE TABLE keywords (
   FOREIGN KEY (citekey) REFERENCES records(citekey) ON DELETE CASCADE
 );
 
+CREATE TABLE tags (
+  citekey TEXT, tag TEXT,
+  PRIMARY KEY (citekey, tag),
+  FOREIGN KEY (citekey) REFERENCES records(citekey) ON DELETE CASCADE
+);
+CREATE INDEX idx_tags_tag ON tags(tag);
+
 CREATE TABLE attachments (
   citekey TEXT, ord INTEGER, path TEXT NOT NULL, kind TEXT NOT NULL,
   PRIMARY KEY (citekey, ord),
@@ -213,6 +223,8 @@ CREATE VIRTUAL TABLE fts USING fts5(
 );
 ```
 
+The FTS `keywords` column contains both `keywords:` and `tags:` text, so `glean search proj-a` can find records tagged `proj-a`. Exact tag filtering should use `glean ls --tag <tag>`, which normalizes the argument and queries the `tags` table.
+
 Incoming citations for record `R` with DOI `D` and citekey `C` are `SELECT citekey FROM outgoing WHERE target IN (?, ?)`, passing `D` and `C`. Not a stored table; cheap with the index on `target`.
 
 Resolving a reference target: if the string contains `/` it's a DOI; look it up in `records.doi`, then fall back to `stubs.doi`. Otherwise it's a citekey; look it up in `records.citekey`, then fall back to `stubs.citekey`.
@@ -228,7 +240,9 @@ glean edit <citekey>                          # open YAML in $EDITOR
 glean info <citekey>                          # pretty-print metadata
 glean open <citekey> [--kind main|supplement|erratum|...]   # macOS `open`
 glean search <query>                          # FTS5 + fzf, one-line-per-hit
-glean ls [--year YYYY] [--author FAMILY] [--unread]
+glean ls [--year YYYY] [--author FAMILY] [--tag TAG] [--unread]
+glean tag add <citekey> <tag>                 # normalize + attach a tag
+glean tag rm  <citekey> <tag>                 # harmless if absent
 glean export [--format bibtex|ris|json] [--all | <citekey>...]
 glean reindex [--force]
 glean reconcile-attachments [--dry-run]
@@ -311,6 +325,8 @@ Two downstream tools depend on glean. Their interfaces are fixed now even though
 **paper_intake/worker.py** currently calls Bookends via AppleScript and relies on a duplicate-returns-empty-string convention. The replacement is `glean add --quiet <doi-or-arxiv>`. Exit codes drive the caller: `0` means added, `4` means duplicate (existing record found — this is the normal case paper_intake sees for already-known papers), `5` means resolve failure (network or not-found), `6` means validation error. paper_intake's dedup, supersession, PDF fetch, and relevance filter layers all stay; only the ~300 LOC in `worker.py` that calls Bookends gets swapped for subprocess calls to `glean add --quiet`.
 
 **bibmatch** (`~/Documents/Work/reviews/tools/bibmatch.py`) currently indexes from Bookends. Rather than letting it read `records/*.yaml` directly — which would couple it to glean's file layout — it consumes `glean export --format json --all`. The JSON format is part of glean's stable interface: one object per record with the full metadata, suitable for bibmatch to reindex on its own cadence. If I change the YAML schema later, the JSON export can stay stable.
+
+JSON export includes `tags` as a list on every record. Records without tags emit an empty list so downstream tools can filter without schema probing.
 
 ## Migration from Bookends
 

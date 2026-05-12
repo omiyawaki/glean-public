@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from glean.schema import Attachment, Author, Record
-from glean.store import Library, attachment_filename, dumps, loads
+from glean.store import Library, attachment_filename, dumps, loads, normalize_tag
 
 
 def test_load_journal_article(lib: Library):
@@ -49,6 +49,21 @@ def test_round_trip_is_idempotent_in_memory(lib: Library):
     r2 = loads(text1)
     text2 = dumps(r2)
     assert text1 == text2
+
+
+def test_tags_round_trip_in_yaml(lib: Library):
+    r = lib.load("Miyawaki2024Attention")
+    r.tags = ["proj-a", "upper-troposphere"]
+    text = dumps(r)
+
+    assert "tags: [proj-a, upper-troposphere]" in text
+    assert loads(text).tags == ["proj-a", "upper-troposphere"]
+
+
+def test_tag_normalization():
+    assert normalize_tag(" PROJ-A ") == "proj-a"
+    assert normalize_tag("Upper Troposphere") == "upper-troposphere"
+    assert normalize_tag("Field_Data") == "field-data"
 
 
 def test_save_bumps_modified_at(lib: Library, tmp_path: Path):

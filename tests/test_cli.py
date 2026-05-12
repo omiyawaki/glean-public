@@ -26,6 +26,17 @@ def test_info_known(cli_env, capsys):
     assert "attachments:" in out
 
 
+def test_info_shows_tags(cli_env, capsys):
+    r = cli_env.load("Miyawaki2024Attention")
+    r.tags = ["proj-a", "field-data"]
+    cli_env.save(r)
+
+    rc = main(["info", "Miyawaki2024Attention"])
+
+    assert rc == 0
+    assert "tags: proj-a, field-data" in capsys.readouterr().out
+
+
 def test_info_unknown(cli_env, capsys):
     rc = main(["info", "NoSuchKey"])
     assert rc == 1
@@ -36,6 +47,17 @@ def test_search_returns_hits(cli_env, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "Miyawaki2024Attention" in out
+
+
+def test_search_matches_tags(cli_env, capsys):
+    r = cli_env.load("Miyawaki2024Attention")
+    r.tags = ["proj-a"]
+    cli_env.save(r)
+
+    rc = main(["search", "proj-a"])
+
+    assert rc == 0
+    assert "Miyawaki2024Attention" in capsys.readouterr().out
 
 
 def test_search_no_hits(cli_env):
@@ -59,6 +81,19 @@ def test_ls_by_author(cli_env, capsys):
     assert "Miyawaki2023Transformer" in out
 
 
+def test_ls_by_tag(cli_env, capsys):
+    r = cli_env.load("Miyawaki2024Attention")
+    r.tags = ["proj-a"]
+    cli_env.save(r)
+
+    rc = main(["ls", "--tag", "PROJ-A"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Miyawaki2024Attention" in out
+    assert "Arakawa1974Schubert" not in out
+
+
 def test_export_json(cli_env, capsys):
     rc = main(["export", "--format", "json", "Arakawa1974Schubert"])
     assert rc == 0
@@ -66,6 +101,19 @@ def test_export_json(cli_env, capsys):
     data = json.loads(out)
     assert data[0]["citekey"] == "Arakawa1974Schubert"
     assert data[0]["authors"][0]["family"] == "Arakawa"
+    assert data[0]["tags"] == []
+
+
+def test_export_json_includes_tags(cli_env, capsys):
+    r = cli_env.load("Miyawaki2024Attention")
+    r.tags = ["proj-a", "upper-troposphere"]
+    cli_env.save(r)
+
+    rc = main(["export", "--format", "json", "Miyawaki2024Attention"])
+
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data[0]["tags"] == ["proj-a", "upper-troposphere"]
 
 
 def test_export_bibtex(cli_env, capsys):
@@ -371,6 +419,49 @@ def test_set_rejects_bad_type(cli_env):
 
 def test_set_missing_citekey_returns_1(cli_env):
     rc = main(["set", "NoSuchKey", "--set", "abstract=x"])
+    assert rc == 1
+
+
+# ---------- glean tag ----------
+
+def test_tag_add_normalizes_and_deduplicates(cli_env, capsys):
+    main(["reindex", "--force"])
+    capsys.readouterr()
+
+    rc1 = main(["tag", "add", "Miyawaki2024Attention", "PROJ-A"])
+    rc2 = main(["tag", "add", "Miyawaki2024Attention", "proj-a"])
+
+    assert (rc1, rc2) == (0, 0)
+    assert cli_env.load("Miyawaki2024Attention").tags == ["proj-a"]
+    out = capsys.readouterr().out
+    assert "added tag proj-a" in out
+    assert "already has tag proj-a" in out
+
+
+def test_tag_rm_removes_tag(cli_env, capsys):
+    r = cli_env.load("Miyawaki2024Attention")
+    r.tags = ["proj-a", "upper-troposphere"]
+    cli_env.save(r)
+    main(["reindex", "--force"])
+    capsys.readouterr()
+
+    rc = main(["tag", "rm", "Miyawaki2024Attention", "PROJ-A"])
+
+    assert rc == 0
+    assert cli_env.load("Miyawaki2024Attention").tags == ["upper-troposphere"]
+    assert "removed tag proj-a" in capsys.readouterr().out
+
+
+def test_tag_rm_absent_is_harmless(cli_env, capsys):
+    rc = main(["tag", "rm", "Miyawaki2024Attention", "proj-a"])
+
+    assert rc == 0
+    assert cli_env.load("Miyawaki2024Attention").tags == []
+    assert "does not have tag proj-a" in capsys.readouterr().out
+
+
+def test_tag_missing_citekey_returns_1(cli_env):
+    rc = main(["tag", "add", "NoSuchKey", "proj-a"])
     assert rc == 1
 
 

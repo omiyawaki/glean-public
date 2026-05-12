@@ -55,6 +55,14 @@ CREATE TABLE IF NOT EXISTS keywords (
     FOREIGN KEY (citekey) REFERENCES records(citekey) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS tags (
+    citekey TEXT NOT NULL,
+    tag     TEXT NOT NULL,
+    PRIMARY KEY (citekey, tag),
+    FOREIGN KEY (citekey) REFERENCES records(citekey) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+
 CREATE TABLE IF NOT EXISTS attachments (
     citekey TEXT NOT NULL,
     ord     INTEGER NOT NULL,
@@ -128,7 +136,7 @@ class Index:
     def rebuild(self) -> None:
         conn = self.connect()
         with conn:
-            for table in ("records", "authors", "keywords", "attachments", "outgoing", "stubs", "fts"):
+            for table in ("records", "authors", "keywords", "tags", "attachments", "outgoing", "stubs", "fts"):
                 conn.execute(f"DELETE FROM {table}")
         for record in self.library.iter_records():
             self._upsert(record)
@@ -205,6 +213,10 @@ class Index:
                 [(record.citekey, kw) for kw in record.keywords],
             )
             conn.executemany(
+                "INSERT INTO tags(citekey, tag) VALUES (?, ?)",
+                [(record.citekey, tag) for tag in record.tags],
+            )
+            conn.executemany(
                 "INSERT INTO attachments(citekey, ord, path, kind) VALUES (?, ?, ?, ?)",
                 [
                     (record.citekey, i, a.path, a.kind)
@@ -222,7 +234,7 @@ class Index:
                     record.citekey,
                     record.title,
                     record.abstract or "",
-                    " ".join(record.keywords),
+                    " ".join(record.keywords + record.tags),
                     _authors_flat(record),
                 ),
             )

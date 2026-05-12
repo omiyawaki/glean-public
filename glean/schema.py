@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+import re
 from typing import Optional
+import unicodedata
 
 
 TYPE_ENUM = frozenset({
@@ -35,6 +37,37 @@ ATTACHMENT_KIND_ENUM = frozenset({
 
 class ValidationError(ValueError):
     pass
+
+
+_TAG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_tag(tag: str) -> str:
+    """Normalize a user-facing tag to a lowercase ASCII slug."""
+    if not isinstance(tag, str):
+        raise ValidationError(f"tag must be a string, got {type(tag).__name__}")
+    ascii_tag = (
+        unicodedata.normalize("NFKD", tag)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+    )
+    slug = _TAG_NON_ALNUM.sub("-", ascii_tag).strip("-")
+    if not slug:
+        raise ValidationError("tag must contain at least one ASCII letter or digit")
+    return slug
+
+
+def normalize_tags(tags: list[str]) -> list[str]:
+    """Normalize and de-duplicate tags while preserving first-seen order."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        slug = normalize_tag(tag)
+        if slug not in seen:
+            normalized.append(slug)
+            seen.add(slug)
+    return normalized
 
 
 @dataclass
@@ -72,6 +105,7 @@ class Record:
     url: Optional[str] = None
     abstract: Optional[str] = None
     keywords: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
     read: bool = False
     notes: Optional[str] = None
@@ -102,6 +136,14 @@ def validate(record: Record) -> None:
             raise ValidationError("author family is required")
     if not isinstance(record.year, int):
         raise ValidationError(f"year must be an int, got {type(record.year).__name__}")
+    seen_tags: set[str] = set()
+    for tag in record.tags:
+        normalized = normalize_tag(tag)
+        if tag != normalized:
+            raise ValidationError(f"tag is not normalized: {tag!r}")
+        if tag in seen_tags:
+            raise ValidationError(f"duplicate tag: {tag!r}")
+        seen_tags.add(tag)
 
     main_count = 0
     for a in record.attachments:
