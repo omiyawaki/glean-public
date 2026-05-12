@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from glean.index import Index
-from glean.store import Library, loads
+from glean.store import Library
 
 
 REFRESH_INTERVAL_S = 60
@@ -66,7 +66,7 @@ def _record_detail(lib: Library, citekey: str) -> dict | None:
     path = lib.path_for(citekey)
     if not path.is_file():
         return None
-    record = loads(path.read_text(encoding="utf-8"))
+    record = lib.load(citekey)
     return {
         "citekey": record.citekey,
         "type": record.type,

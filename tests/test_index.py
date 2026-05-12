@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 
 from glean.index import Index
 from glean.schema import Author, Record
@@ -144,3 +145,37 @@ def test_refresh_detects_additions(index: Index, lib: Library):
     lib.save(r, today=date(2026, 4, 20))
     added, updated, deleted = index.refresh()
     assert (added, updated, deleted) == (1, 0, 0)
+
+
+def test_refresh_retries_transient_record_read_deadlock(
+    index: Index,
+    lib: Library,
+    monkeypatch,
+):
+    index.rebuild()
+    r = Record(
+        citekey="Held2019Radiative",
+        type="journal-article",
+        title="Radiative-convective equilibrium",
+        authors=[Author(family="Held", given="Isaac")],
+        year=2019,
+        added_at=None,
+        modified_at=None,
+    )
+    lib.save(r, today=date(2026, 4, 20))
+    original_read_text = Path.read_text
+    calls = 0
+
+    def flaky_read_text(path: Path, *args, **kwargs):
+        nonlocal calls
+        if path.name == "Held2019Radiative.yaml" and calls == 0:
+            calls += 1
+            raise OSError(11, "Resource deadlock avoided")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    added, updated, deleted = index.refresh()
+
+    assert (added, updated, deleted) == (1, 0, 0)
+    assert calls == 1

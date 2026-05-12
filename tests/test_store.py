@@ -66,6 +66,24 @@ def test_tag_normalization():
     assert normalize_tag("Field_Data") == "field-data"
 
 
+def test_library_load_retries_transient_deadlock(lib: Library, monkeypatch):
+    original_read_text = Path.read_text
+    calls = 0
+
+    def flaky_read_text(path: Path, *args, **kwargs):
+        nonlocal calls
+        if path.name == "Miyawaki2024Attention.yaml" and calls == 0:
+            calls += 1
+            raise OSError(11, "Resource deadlock avoided")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+    record = lib.load("Miyawaki2024Attention")
+
+    assert record.citekey == "Miyawaki2024Attention"
+    assert calls == 1
+
+
 def test_save_bumps_modified_at(lib: Library, tmp_path: Path):
     r = lib.load("Vallis2019AOFD")
     assert r.modified_at == date(2026, 3, 2)

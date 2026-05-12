@@ -8,8 +8,10 @@ See DESIGN.md "Data model" and "Attachment filenames".
 
 from __future__ import annotations
 
+import errno
 import io
 import re
+import time
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -43,6 +45,13 @@ _KIND_SUFFIX = {
 }
 
 _FS_HOSTILE = re.compile(r"[\x00-\x1f/]")
+_TRANSIENT_READ_ERRNOS = {
+    errno.EAGAIN,
+    errno.EBUSY,
+    getattr(errno, "EDEADLK", errno.EAGAIN),
+}
+_READ_ATTEMPTS = 4
+_READ_RETRY_DELAY_S = 0.05
 
 
 def _yaml() -> YAML:
@@ -194,6 +203,20 @@ def loads(text: str) -> Record:
     return record
 
 
+def _read_record_text(path: Path) -> str:
+    """Read YAML text, retrying transient iCloud/file-provider errors."""
+    delay = _READ_RETRY_DELAY_S
+    for attempt in range(_READ_ATTEMPTS):
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_READ_ERRNOS or attempt == _READ_ATTEMPTS - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("unreachable")
+
+
 def _ascii_family(family: str) -> str:
     # Keep diacritics per policy; only strip fs-hostile characters.
     return _FS_HOSTILE.sub("", family).strip()
@@ -250,7 +273,7 @@ class Library:
 
     def load(self, citekey: str) -> Record:
         path = self.path_for(citekey)
-        return loads(path.read_text(encoding="utf-8"))
+        return loads(_read_record_text(path))
 
     def save(self, record: Record, *, today: Optional[date] = None) -> None:
         self.ensure_dirs()
@@ -266,4 +289,4 @@ class Library:
         if not self.records_dir.is_dir():
             return
         for p in sorted(self.records_dir.glob("*.yaml")):
-            yield loads(p.read_text(encoding="utf-8"))
+            yield loads(_read_record_text(p))
