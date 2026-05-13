@@ -232,7 +232,7 @@ Resolving a reference target: if the string contains `/` it's a DOI; look it up 
 ## CLI surface
 
 ```
-glean add <doi | arxiv-id | url> [--quiet]    # fetch + write YAML
+glean add <doi | arxiv-id | url> [--quiet]    # fetch metadata, write YAML, best-effort PDF
 glean add --bib <file>                        # import a .bib
 glean rm <citekey>                            # delete YAML + cascade
 glean rename <old> <new>                      # transactional; rewrites ref pointers
@@ -266,7 +266,7 @@ Exit codes:
 - `5` resolve or network failure (couldn't turn input into metadata; OpenAlex/Crossref unreachable)
 - `6` validation error (bad input format, YAML schema violation)
 
-`glean add --quiet` suppresses stdout and relies entirely on exit codes. This is the contract paper_intake will depend on (see "Integration contract" below).
+`glean add --quiet` keeps stdout parseable as the citekey only and relies on exit codes for control flow. This is the contract paper_intake depends on (see "Integration contract" below). Successful adds also make a best-effort PDF acquisition attempt via `paper_intake.pdf_fetch`; PDF fetch failures are non-fatal and, when paper_intake is available, add the DOI to its PDF backlog for manual follow-up.
 
 `glean reindex` without flags scans for YAMLs not in the index, drops rows for YAMLs that no longer exist, and refreshes rows whose `modified_at` changed. `--force` drops the index and rebuilds from scratch. Per-query staleness checks mean `reindex` is rarely needed by hand; it exists for recovery and for post-migration sanity.
 
@@ -316,13 +316,13 @@ from glean.graph.queries import (
 
 `shortest_path(a, b)` uses networkx over the outgoing edges. Optional, cheap, useful for visualizations.
 
-Reference population is lazy: `glean add` does not fetch references by default. The user (or paper_intake, later) calls `glean graph fetch` when the graph matters. This keeps `add` fast and keeps network failures out of the critical path.
+Reference population is lazy: `glean add` does not fetch references by default. The user (or paper_intake, later) calls `glean graph fetch` when the graph matters. This keeps citation-graph network failures out of the critical path. PDF acquisition is different: `glean add` tries to fetch and attach an available PDF immediately, but treats failure as a backlog item rather than an add failure.
 
 ## Integration contract
 
 Two downstream tools depend on glean. Their interfaces are fixed now even though the code swap happens in step 7.
 
-**paper_intake/worker.py** currently calls Bookends via AppleScript and relies on a duplicate-returns-empty-string convention. The replacement is `glean add --quiet <doi-or-arxiv>`. Exit codes drive the caller: `0` means added, `4` means duplicate (existing record found — this is the normal case paper_intake sees for already-known papers), `5` means resolve failure (network or not-found), `6` means validation error. paper_intake's dedup, supersession, PDF fetch, and relevance filter layers all stay; only the ~300 LOC in `worker.py` that calls Bookends gets swapped for subprocess calls to `glean add --quiet`.
+**paper_intake/worker.py** calls `glean add --quiet <doi-or-arxiv>`. Exit codes drive the caller: `0` means added, `4` means duplicate (existing record found — this is the normal case paper_intake sees for already-known papers), `5` means resolve failure (network or not-found), `6` means validation error. `glean add` owns the first PDF acquisition attempt so manual/project/RSS additions share one behavior; paper_intake still owns the publisher-specific fetch implementation, duplicate self-healing, supersession, relevance filtering, and the PDF backlog UI.
 
 **bibmatch** (`~/Documents/Work/reviews/tools/bibmatch.py`) currently indexes from Bookends. Rather than letting it read `records/*.yaml` directly — which would couple it to glean's file layout — it consumes `glean export --format json --all`. The JSON format is part of glean's stable interface: one object per record with the full metadata, suitable for bibmatch to reindex on its own cadence. If I change the YAML schema later, the JSON export can stay stable.
 
@@ -374,4 +374,4 @@ Snapshot granularity is daily, not per-change. That's enough for "undo my mistak
 
 ## What v1 does not include
 
-No web UI. No ingestion from email or RSS (that stays in paper_intake). No automatic PDF download (paper_intake's `pdf_fetch.py` stays authoritative). No collaborative editing. No conflict resolution beyond what git gives me. No iPad editing UI; iOS access is read-only browsing via Files.app.
+No web UI. No ingestion from email or RSS (that stays in paper_intake). No collaborative editing. No conflict resolution beyond what git gives me. No iPad editing UI; iOS access is read-only browsing via Files.app.

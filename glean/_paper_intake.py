@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Optional
 
 _PI_DIR = str(Path("~/tools/paper_intake").expanduser())
 
@@ -31,3 +31,33 @@ def crossref_metadata(doi: str) -> Optional[dict]:
     _ensure_on_path()
     from resolver import crossref_metadata as _fn
     return _fn(doi)
+
+
+def resolve_ams_landing_url(doi: str) -> Optional[str]:
+    _ensure_on_path()
+    from pdf_fetch import resolve_ams_landing_url as _fn
+    return _fn(doi)
+
+
+def fetch_pdf(
+    doi: str,
+    publisher_url: str,
+    title: str,
+    *,
+    dir_path: str,
+) -> Any:
+    _ensure_on_path()
+    from pdf_fetch import fetch_pdf as _fn
+    return _fn(doi, publisher_url, title, dir_path=dir_path)
+
+
+def pdf_backlog_add(
+    doi: str,
+    *,
+    title: str = "",
+    citekey: str = "",
+    tried: Optional[list] = None,
+) -> None:
+    _ensure_on_path()
+    import pdf_backlog
+    pdf_backlog.add(doi, title=title, citekey=citekey, tried=tried)

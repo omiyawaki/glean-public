@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 from typing import Iterable, Optional
@@ -506,6 +507,7 @@ def cmd_add(args: argparse.Namespace) -> int:
 
     lib.save(record)
     idx._upsert(record)
+    _try_fetch_pdf_for_record(lib, idx, record, doi, quiet=args.quiet)
     print(citekey)
     return 0
 
@@ -538,6 +540,111 @@ def _unique_attachment_name(lib: Library, record: Record, kind: str) -> str:
     raise RuntimeError(f"too many attachment-name collisions for {record.citekey}")
 
 
+def _attach_existing_file(
+    lib: Library,
+    idx: Index,
+    record: Record,
+    src: Path,
+    *,
+    kind: str = "main",
+    move: bool = False,
+) -> Path:
+    """Attach an existing file to record and return the library path."""
+    keep: list[Attachment] = []
+    for a in record.attachments:
+        if a.kind == kind:
+            old = lib.root / a.path
+            if old.exists():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        else:
+            keep.append(a)
+    record.attachments = keep
+
+    name = _unique_attachment_name(lib, record, kind)
+    dst = lib.root / "attachments" / name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    if move:
+        try:
+            src.unlink()
+        except OSError:
+            pass
+    record.attachments.append(Attachment(path=f"attachments/{name}", kind=kind))
+    lib.save(record)
+    idx._upsert(record)
+    return dst
+
+
+def _try_fetch_pdf_for_record(
+    lib: Library,
+    idx: Index,
+    record: Record,
+    doi: str,
+    *,
+    quiet: bool,
+) -> None:
+    """Best-effort PDF fetch for newly-added records.
+
+    PDF failures never change the add exit code; the record remains useful and
+    paper_intake's backlog tracks the manual follow-up when available.
+    """
+    if record.main_attachment():
+        return
+
+    from glean import _paper_intake
+
+    staging = Path(tempfile.mkdtemp(prefix="glean_pdf_"))
+    tried: list[str] = []
+    try:
+        try:
+            publisher_url = _paper_intake.resolve_ams_landing_url(doi) or f"https://doi.org/{doi}"
+            result = _paper_intake.fetch_pdf(
+                doi,
+                publisher_url,
+                record.title,
+                dir_path=str(staging),
+            )
+            tried = list(getattr(result, "tried", []) or [])
+        except Exception as exc:
+            _queue_pdf_backlog(doi, record, tried)
+            if not quiet:
+                _err(f"warning: PDF fetch failed for {doi}: {exc}")
+            return
+
+        filename = getattr(result, "filename", None)
+        if filename:
+            src = staging / filename
+            if src.is_file():
+                dst = _attach_existing_file(lib, idx, record, src, kind="main", move=True)
+                if not quiet:
+                    label = getattr(result, "candidate_label", None) or "unknown"
+                    _err(f"PDF fetched for {record.citekey}: {dst} via {label}")
+                return
+
+        _queue_pdf_backlog(doi, record, tried)
+        if not quiet:
+            reason = getattr(result, "reason", "") or "no PDF candidate succeeded"
+            _err(f"PDF not fetched for {doi}: {reason}")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _queue_pdf_backlog(doi: str, record: Record, tried: list[str]) -> None:
+    try:
+        from glean import _paper_intake
+        _paper_intake.pdf_backlog_add(
+            doi,
+            title=record.title,
+            citekey=record.citekey,
+            tried=tried,
+        )
+    except Exception:
+        pass
+
+
 def cmd_attach(args: argparse.Namespace) -> int:
     lib = _library()
     idx = _index(lib)
@@ -550,34 +657,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
         _err(f"source file not found: {src}")
         return 2
     r = lib.load(args.citekey)
-    kind = args.kind
-
-    # Remove any existing attachment of the same kind (both record and disk).
-    keep: list[Attachment] = []
-    for a in r.attachments:
-        if a.kind == kind:
-            old = lib.root / a.path
-            if old.exists():
-                try:
-                    old.unlink()
-                except OSError:
-                    pass
-        else:
-            keep.append(a)
-    r.attachments = keep
-
-    name = _unique_attachment_name(lib, r, kind)
-    dst = lib.root / "attachments" / name
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-    if args.move:
-        try:
-            src.unlink()
-        except OSError:
-            pass
-    r.attachments.append(Attachment(path=f"attachments/{name}", kind=kind))
-    lib.save(r)
-    idx._upsert(r)
+    dst = _attach_existing_file(lib, idx, r, src, kind=args.kind, move=args.move)
     print(str(dst))
     return 0
 

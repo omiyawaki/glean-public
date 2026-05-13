@@ -177,6 +177,19 @@ def _patch_paper_intake(monkeypatch, *, doi=None, meta=None):
     from glean import _paper_intake
     monkeypatch.setattr(_paper_intake, "normalize_identifier", lambda _: doi)
     monkeypatch.setattr(_paper_intake, "crossref_metadata", lambda _: meta)
+    monkeypatch.setattr(_paper_intake, "resolve_ams_landing_url", lambda _: None, raising=False)
+    monkeypatch.setattr(
+        _paper_intake,
+        "fetch_pdf",
+        lambda *_, **__: type("FetchResult", (), {
+            "filename": None,
+            "candidate_label": None,
+            "tried": [],
+            "reason": "no candidates",
+        })(),
+        raising=False,
+    )
+    monkeypatch.setattr(_paper_intake, "pdf_backlog_add", lambda *_, **__: None, raising=False)
 
 
 def test_add_unresolvable_returns_5(cli_env, monkeypatch):
@@ -239,6 +252,101 @@ def test_add_success(cli_env, monkeypatch, capsys):
     assert r.doi == "10.1234/new-record"
     assert r.journal == "Nature"
     assert r.type == "journal-article"
+
+
+def test_add_success_fetches_and_attaches_pdf(cli_env, monkeypatch, capsys):
+    from glean import _paper_intake
+
+    _patch_paper_intake(
+        monkeypatch,
+        doi="10.5194/acp-17-12495-2017",
+        meta={
+            "title": "In situ temperature measurements",
+            "authors": "Berkes, Florian",
+            "journal": "Atmospheric Chemistry and Physics",
+            "abstract": "",
+            "year": "2017",
+        },
+    )
+
+    def fake_fetch_pdf(doi, publisher_url, title, *, dir_path, **_):
+        pdf = Path(dir_path) / "berkes.pdf"
+        pdf.write_bytes(b"%PDF-1.4\nfake\n")
+        assert doi == "10.5194/acp-17-12495-2017"
+        assert publisher_url == "https://doi.org/10.5194/acp-17-12495-2017"
+        assert title == "In situ temperature measurements"
+        return type("FetchResult", (), {
+            "filename": "berkes.pdf",
+            "candidate_label": "copernicus-journal-pdf",
+            "tried": ["copernicus-journal-pdf"],
+            "reason": "",
+        })()
+
+    monkeypatch.setattr(_paper_intake, "fetch_pdf", fake_fetch_pdf)
+    main(["reindex", "--force"])
+    capsys.readouterr()
+
+    rc = main(["add", "anything"])
+
+    out = capsys.readouterr().out.strip()
+    assert rc == 0
+    assert out == "Berkes2017Situ"
+    r = cli_env.load("Berkes2017Situ")
+    assert [a.kind for a in r.attachments] == ["main"]
+    assert (cli_env.root / r.attachments[0].path).read_bytes() == b"%PDF-1.4\nfake\n"
+
+
+def test_add_success_queues_pdf_backlog_when_fetch_fails(cli_env, monkeypatch, capsys):
+    from glean import _paper_intake
+
+    _patch_paper_intake(
+        monkeypatch,
+        doi="10.1234/no-pdf",
+        meta={
+            "title": "No PDF yet",
+            "authors": "Smith, Jane",
+            "journal": "Journal",
+            "abstract": "",
+            "year": "2026",
+        },
+    )
+    backlog_calls = []
+
+    monkeypatch.setattr(
+        _paper_intake,
+        "fetch_pdf",
+        lambda *_, **__: type("FetchResult", (), {
+            "filename": None,
+            "candidate_label": None,
+            "tried": ["crossref-link"],
+            "reason": "all candidates failed",
+        })(),
+    )
+    monkeypatch.setattr(
+        _paper_intake,
+        "pdf_backlog_add",
+        lambda doi, **kwargs: backlog_calls.append((doi, kwargs)),
+    )
+    main(["reindex", "--force"])
+    capsys.readouterr()
+
+    rc = main(["add", "anything"])
+
+    out = capsys.readouterr().out.strip()
+    assert rc == 0
+    assert out == "Smith2026No"
+    r = cli_env.load("Smith2026No")
+    assert r.attachments == []
+    assert backlog_calls == [
+        (
+            "10.1234/no-pdf",
+            {
+                "title": "No PDF yet",
+                "citekey": "Smith2026No",
+                "tried": ["crossref-link"],
+            },
+        )
+    ]
 
 
 def test_add_arxiv_preprint(cli_env, monkeypatch, capsys):
