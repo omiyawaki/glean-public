@@ -585,14 +585,15 @@ def _try_fetch_pdf_for_record(
     doi: str,
     *,
     quiet: bool,
-) -> None:
-    """Best-effort PDF fetch for newly-added records.
+    fetcher: object | None = None,
+) -> str:
+    """Best-effort PDF fetch for records without a main attachment.
 
     PDF failures never change the add exit code; the record remains useful and
     paper_intake's backlog tracks the manual follow-up when available.
     """
     if record.main_attachment():
-        return
+        return "skipped"
 
     from glean import _paper_intake
 
@@ -605,29 +606,31 @@ def _try_fetch_pdf_for_record(
                 doi,
                 publisher_url,
                 record.title,
+                fetcher=fetcher,
                 dir_path=str(staging),
             )
             tried = list(getattr(result, "tried", []) or [])
         except Exception as exc:
-            _queue_pdf_backlog(doi, record, tried)
             if not quiet:
                 _err(f"warning: PDF fetch failed for {doi}: {exc}")
-            return
+            return "failed"
 
         filename = getattr(result, "filename", None)
         if filename:
             src = staging / filename
             if src.is_file():
                 dst = _attach_existing_file(lib, idx, record, src, kind="main", move=True)
+                _clear_pdf_backlog(doi)
                 if not quiet:
                     label = getattr(result, "candidate_label", None) or "unknown"
                     _err(f"PDF fetched for {record.citekey}: {dst} via {label}")
-                return
+                return "attached"
 
         _queue_pdf_backlog(doi, record, tried)
         if not quiet:
             reason = getattr(result, "reason", "") or "no PDF candidate succeeded"
             _err(f"PDF not fetched for {doi}: {reason}")
+        return "queued"
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -643,6 +646,88 @@ def _queue_pdf_backlog(doi: str, record: Record, tried: list[str]) -> None:
         )
     except Exception:
         pass
+
+
+def _clear_pdf_backlog(doi: str) -> None:
+    try:
+        from glean import _paper_intake
+        _paper_intake.pdf_backlog_remove(doi)
+    except Exception:
+        pass
+
+
+def _missing_main_pdf_records(lib: Library) -> list[Record]:
+    return [
+        record
+        for record in lib.iter_records()
+        if record.doi and not record.main_attachment()
+    ]
+
+
+def cmd_backfill_pdfs(args: argparse.Namespace) -> int:
+    lib = _library()
+    idx = _index(lib)
+    idx.refresh()
+
+    if args.limit is not None and args.limit < 0:
+        _err("--limit must be non-negative")
+        return 6
+
+    if args.citekey:
+        if not lib.exists(args.citekey):
+            _err(f"not found: {args.citekey}")
+            return 1
+        record = lib.load(args.citekey)
+        records = [record] if record.doi and not record.main_attachment() else []
+    else:
+        records = _missing_main_pdf_records(lib)
+
+    if args.limit is not None:
+        records = records[:args.limit]
+
+    if args.dry_run:
+        print(f"dry-run: {len(records)} record(s) would be attempted")
+        for record in records:
+            print(f"{record.citekey}\t{record.doi}\t{record.title}")
+        return 0
+
+    counts = {"attached": 0, "queued": 0, "failed": 0, "skipped": 0}
+    fetcher = None
+    if records:
+        try:
+            from glean import _paper_intake
+            fetcher = _paper_intake.make_pdf_fetcher()
+        except Exception as exc:
+            _err(f"warning: could not initialize reusable PDF fetcher: {exc}")
+    try:
+        for record in records:
+            assert record.doi is not None
+            status = _try_fetch_pdf_for_record(
+                lib,
+                idx,
+                record,
+                record.doi,
+                quiet=False,
+                fetcher=fetcher,
+            )
+            counts[status] = counts.get(status, 0) + 1
+            print(f"{status}\t{record.citekey}\t{record.doi}", flush=True)
+    finally:
+        if fetcher is not None:
+            try:
+                fetcher.close()
+            except Exception:
+                pass
+
+    print(
+        "summary: "
+        f"attempted={len(records)} "
+        f"attached={counts['attached']} "
+        f"queued={counts['queued']} "
+        f"failed={counts['failed']} "
+        f"skipped={counts['skipped']}"
+    )
+    return 0
 
 
 def cmd_attach(args: argparse.Namespace) -> int:
@@ -996,6 +1081,15 @@ def _build_parser() -> argparse.ArgumentParser:
     addp.add_argument("identifier", nargs="?")
     addp.add_argument("--quiet", action="store_true")
     addp.set_defaults(func=cmd_add)
+
+    bfp = sub.add_parser(
+        "backfill-pdfs",
+        help="attempt PDF fetch for DOI records missing a main attachment",
+    )
+    bfp.add_argument("--dry-run", action="store_true")
+    bfp.add_argument("--limit", type=int, help="maximum records to attempt")
+    bfp.add_argument("--citekey", help="attempt one eligible record")
+    bfp.set_defaults(func=cmd_backfill_pdfs)
 
     tuip = sub.add_parser("tui", help="(deferred) Textual TUI")
     tuip.set_defaults(func=cmd_tui)

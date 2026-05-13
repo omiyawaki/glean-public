@@ -44,11 +44,18 @@ def fetch_pdf(
     publisher_url: str,
     title: str,
     *,
+    fetcher: Any = None,
     dir_path: str,
 ) -> Any:
     _ensure_on_path()
     from pdf_fetch import fetch_pdf as _fn
-    return _fn(doi, publisher_url, title, dir_path=dir_path)
+    return _fn(doi, publisher_url, title, fetcher=fetcher, dir_path=dir_path)
+
+
+def make_pdf_fetcher() -> Any:
+    _ensure_on_path()
+    from pdf_fetch import PdfFetcher
+    return PdfFetcher()
 
 
 def pdf_backlog_add(
@@ -61,3 +68,9 @@ def pdf_backlog_add(
     _ensure_on_path()
     import pdf_backlog
     pdf_backlog.add(doi, title=title, citekey=citekey, tried=tried)
+
+
+def pdf_backlog_remove(doi: str) -> bool:
+    _ensure_on_path()
+    import pdf_backlog
+    return bool(pdf_backlog.remove(doi))

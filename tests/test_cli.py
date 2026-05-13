@@ -378,6 +378,128 @@ def test_add_quiet_suppresses_stdout(cli_env, monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_backfill_pdfs_fetches_missing_main_attachments(cli_env, monkeypatch, capsys):
+    from glean import _paper_intake
+
+    fetched = []
+
+    def fake_fetch_pdf(doi, publisher_url, title, *, dir_path, **_):
+        fetched.append((doi, publisher_url, title))
+        pdf = Path(dir_path) / "paper.pdf"
+        pdf.write_bytes(f"%PDF-1.4\n{doi}\n".encode())
+        return type("FetchResult", (), {
+            "filename": "paper.pdf",
+            "candidate_label": "test-pdf",
+            "tried": ["test-pdf"],
+            "reason": "",
+        })()
+
+    monkeypatch.setattr(_paper_intake, "resolve_ams_landing_url", lambda _: None, raising=False)
+    monkeypatch.setattr(_paper_intake, "fetch_pdf", fake_fetch_pdf)
+    monkeypatch.setattr(_paper_intake, "pdf_backlog_add", lambda *_, **__: None, raising=False)
+    removed = []
+    monkeypatch.setattr(_paper_intake, "pdf_backlog_remove", lambda doi: removed.append(doi), raising=False)
+
+    main(["reindex", "--force"])
+    capsys.readouterr()
+
+    rc = main(["backfill-pdfs", "--citekey", "Arakawa1974Schubert"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "attached\tArakawa1974Schubert" in out
+    assert "attached=1" in out
+    assert fetched == [
+        (
+            "10.1175/1520-0469(1974)031<0674:IOACCE>2.0.CO;2",
+            "https://doi.org/10.1175/1520-0469(1974)031<0674:IOACCE>2.0.CO;2",
+            "Interaction of a cumulus cloud ensemble with the large-scale environment",
+        )
+    ]
+    r = cli_env.load("Arakawa1974Schubert")
+    assert [a.kind for a in r.attachments] == ["main"]
+    assert (cli_env.root / r.attachments[0].path).read_bytes().startswith(b"%PDF-1.4")
+    assert removed == ["10.1175/1520-0469(1974)031<0674:IOACCE>2.0.CO;2"]
+
+
+def test_backfill_pdfs_dry_run_lists_candidates(cli_env, monkeypatch, capsys):
+    from glean import _paper_intake
+
+    fetched = []
+    monkeypatch.setattr(_paper_intake, "fetch_pdf", lambda *args, **kwargs: fetched.append(args), raising=False)
+
+    rc = main(["backfill-pdfs", "--dry-run", "--limit", "2"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "dry-run: 2 record(s) would be attempted" in out
+    assert "Arakawa1974Schubert" in out
+    assert "Miyawaki2024Attention" not in out
+    assert fetched == []
+
+
+def test_backfill_pdfs_fetch_exception_does_not_queue_backlog(cli_env, monkeypatch, capsys):
+    from glean import _paper_intake
+
+    backlog_calls = []
+    monkeypatch.setattr(_paper_intake, "resolve_ams_landing_url", lambda _: None, raising=False)
+    monkeypatch.setattr(
+        _paper_intake,
+        "fetch_pdf",
+        lambda *_, **__: (_ for _ in ()).throw(ModuleNotFoundError("No module named 'playwright'")),
+    )
+    monkeypatch.setattr(
+        _paper_intake,
+        "pdf_backlog_add",
+        lambda doi, **kwargs: backlog_calls.append((doi, kwargs)),
+    )
+
+    main(["reindex", "--force"])
+    capsys.readouterr()
+
+    rc = main(["backfill-pdfs", "--citekey", "Arakawa1974Schubert"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "failed\tArakawa1974Schubert" in out
+    assert "failed=1" in out
+    assert backlog_calls == []
+
+
+def test_backfill_pdfs_reuses_one_fetcher_for_batch(cli_env, monkeypatch, capsys):
+    from glean import _paper_intake
+
+    class FakeFetcher:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    fetcher = FakeFetcher()
+    seen_fetchers = []
+
+    def fake_fetch_pdf(*_, fetcher=None, **__):
+        seen_fetchers.append(fetcher)
+        return type("FetchResult", (), {
+            "filename": None,
+            "candidate_label": None,
+            "tried": ["test-pdf"],
+            "reason": "all candidates failed",
+        })()
+
+    monkeypatch.setattr(_paper_intake, "make_pdf_fetcher", lambda: fetcher, raising=False)
+    monkeypatch.setattr(_paper_intake, "resolve_ams_landing_url", lambda _: None, raising=False)
+    monkeypatch.setattr(_paper_intake, "fetch_pdf", fake_fetch_pdf)
+    monkeypatch.setattr(_paper_intake, "pdf_backlog_add", lambda *_, **__: None, raising=False)
+
+    rc = main(["backfill-pdfs", "--limit", "2"])
+
+    assert rc == 0
+    assert seen_fetchers == [fetcher, fetcher]
+    assert fetcher.closed is True
+
+
 # ---------- glean graph ----------
 
 def test_graph_out(cli_env, capsys):

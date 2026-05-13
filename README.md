@@ -10,7 +10,7 @@ Design: [`DESIGN.md`](DESIGN.md).
 ./install/install.sh
 ```
 
-This runs `pip install --user -e .` and symlinks the `glean` entrypoint into `~/.local/bin/`.
+This installs `glean` into a pipx venv, installs Playwright's Chromium browser for PDF fetching, and exposes the CLI on PATH.
 
 ## Status
 

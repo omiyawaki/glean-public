@@ -18,5 +18,12 @@ PY="${PYTHON:-$PY_DEFAULT}"
     || { echo "Need Python 3.11+; got $("$PY" --version)"; exit 1; }
 
 pipx install --python "$PY" --force -e "$REPO"
+PIPX_HOME="$(pipx environment --value PIPX_HOME 2>/dev/null || true)"
+GLEAN_PY="$PIPX_HOME/venvs/glean/bin/python"
+if [ -x "$GLEAN_PY" ]; then
+    "$GLEAN_PY" -m playwright install chromium
+else
+    echo "Could not locate the glean pipx venv; run 'python -m playwright install chromium' inside it before PDF fetching."
+fi
 echo
 echo "Done. Verify with:  glean --help"
