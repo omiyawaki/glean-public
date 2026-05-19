@@ -467,6 +467,47 @@ def test_backfill_pdfs_fetches_when_main_attachment_file_is_missing(cli_env, mon
     assert removed == ["10.1175/JCLI-D-23-0456.1"]
 
 
+def test_backfill_pdfs_links_existing_canonical_attachment_before_fetching(
+    cli_env,
+    monkeypatch,
+    capsys,
+):
+    from glean import _paper_intake
+
+    attachment = (
+        cli_env.root
+        / "attachments"
+        / "Arakawa and Schubert (1974) Interaction of a cumulus cloud ensemble with the large-scale environment.pdf"
+    )
+    attachment.parent.mkdir(parents=True, exist_ok=True)
+    attachment.write_bytes(b"%PDF-1.4\nalready here\n")
+
+    monkeypatch.setattr(_paper_intake, "resolve_ams_landing_url", lambda _: None, raising=False)
+    monkeypatch.setattr(
+        _paper_intake,
+        "fetch_pdf",
+        lambda *_, **__: (_ for _ in ()).throw(AssertionError("should not fetch")),
+    )
+    removed = []
+    monkeypatch.setattr(_paper_intake, "pdf_backlog_remove", lambda doi: removed.append(doi), raising=False)
+
+    main(["reindex", "--force"])
+    capsys.readouterr()
+
+    rc = main(["backfill-pdfs", "--citekey", "Arakawa1974Schubert"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "attached\tArakawa1974Schubert" in out
+    assert "attached=1" in out
+    r = cli_env.load("Arakawa1974Schubert")
+    assert [a.path for a in r.attachments] == [
+        "attachments/Arakawa and Schubert (1974) Interaction of a cumulus cloud ensemble with the large-scale environment.pdf"
+    ]
+    assert attachment.read_bytes() == b"%PDF-1.4\nalready here\n"
+    assert removed == ["10.1175/1520-0469(1974)031<0674:IOACCE>2.0.CO;2"]
+
+
 def test_backfill_pdfs_with_citekey_does_not_require_full_index_refresh(
     cli_env,
     monkeypatch,

@@ -585,6 +585,51 @@ def _attach_existing_file(
     return dst
 
 
+def _attachment_collision_indices() -> list[Optional[int]]:
+    return [None, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+
+def _looks_like_pdf(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(5).startswith(b"%PDF-")
+    except OSError:
+        return False
+
+
+def _existing_canonical_attachment_file(
+    lib: Library,
+    record: Record,
+    *,
+    kind: str = "main",
+) -> Path | None:
+    for collision_index in _attachment_collision_indices():
+        candidate = lib.attachments_dir / attachment_filename(
+            record,
+            kind=kind,
+            collision_index=collision_index,
+        )
+        if candidate.is_file() and os.access(candidate, os.R_OK) and _looks_like_pdf(candidate):
+            return candidate
+    return None
+
+
+def _link_existing_library_attachment(
+    lib: Library,
+    idx: Index,
+    record: Record,
+    path: Path,
+    *,
+    kind: str = "main",
+) -> Path:
+    keep = [a for a in record.attachments if a.kind != kind]
+    rel = path.relative_to(lib.root).as_posix()
+    record.attachments = keep + [Attachment(path=rel, kind=kind)]
+    lib.save(record)
+    idx._upsert(record)
+    return path
+
+
 def _try_fetch_pdf_for_record(
     lib: Library,
     idx: Index,
@@ -602,6 +647,14 @@ def _try_fetch_pdf_for_record(
     main = record.main_attachment()
     if main and _attachment_file_exists(lib, main):
         return "skipped"
+
+    existing = _existing_canonical_attachment_file(lib, record)
+    if existing is not None:
+        dst = _link_existing_library_attachment(lib, idx, record, existing, kind="main")
+        _clear_pdf_backlog(doi)
+        if not quiet:
+            _err(f"PDF linked for {record.citekey}: {dst}")
+        return "attached"
 
     from glean import _paper_intake
 
