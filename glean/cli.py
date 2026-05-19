@@ -594,12 +594,13 @@ def _try_fetch_pdf_for_record(
     quiet: bool,
     fetcher: object | None = None,
 ) -> str:
-    """Best-effort PDF fetch for records without a main attachment.
+    """Best-effort PDF fetch for records without a readable main PDF.
 
     PDF failures never change the add exit code; the record remains useful and
     paper_intake's backlog tracks the manual follow-up when available.
     """
-    if record.main_attachment():
+    main = record.main_attachment()
+    if main and _attachment_file_exists(lib, main):
         return "skipped"
 
     from glean import _paper_intake
@@ -663,11 +664,22 @@ def _clear_pdf_backlog(doi: str) -> None:
         pass
 
 
+def _attachment_file_exists(lib: Library, attachment: Attachment) -> bool:
+    path = Path(attachment.path).expanduser()
+    full = path if path.is_absolute() else lib.root / path
+    return full.is_file()
+
+
+def _record_missing_readable_main_pdf(lib: Library, record: Record) -> bool:
+    main = record.main_attachment()
+    return bool(record.doi and (main is None or not _attachment_file_exists(lib, main)))
+
+
 def _missing_main_pdf_records(lib: Library) -> list[Record]:
     return [
         record
         for record in lib.iter_records()
-        if record.doi and not record.main_attachment()
+        if _record_missing_readable_main_pdf(lib, record)
     ]
 
 
@@ -685,7 +697,7 @@ def cmd_backfill_pdfs(args: argparse.Namespace) -> int:
             _err(f"not found: {args.citekey}")
             return 1
         record = lib.load(args.citekey)
-        records = [record] if record.doi and not record.main_attachment() else []
+        records = [record] if _record_missing_readable_main_pdf(lib, record) else []
     else:
         records = _missing_main_pdf_records(lib)
 
@@ -1091,7 +1103,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     bfp = sub.add_parser(
         "backfill-pdfs",
-        help="attempt PDF fetch for DOI records missing a main attachment",
+        help="attempt PDF fetch for DOI records missing a readable main PDF",
     )
     bfp.add_argument("--dry-run", action="store_true")
     bfp.add_argument("--limit", type=int, help="maximum records to attempt")

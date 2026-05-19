@@ -422,19 +422,63 @@ def test_backfill_pdfs_fetches_missing_main_attachments(cli_env, monkeypatch, ca
     assert removed == ["10.1175/1520-0469(1974)031<0674:IOACCE>2.0.CO;2"]
 
 
+def test_backfill_pdfs_fetches_when_main_attachment_file_is_missing(cli_env, monkeypatch, capsys):
+    from glean import _paper_intake
+
+    fetched = []
+
+    def fake_fetch_pdf(doi, publisher_url, title, *, dir_path, **_):
+        fetched.append((doi, publisher_url, title))
+        pdf = Path(dir_path) / "replacement.pdf"
+        pdf.write_bytes(f"%PDF-1.4\n{doi}\n".encode())
+        return type("FetchResult", (), {
+            "filename": "replacement.pdf",
+            "candidate_label": "test-pdf",
+            "tried": ["test-pdf"],
+            "reason": "",
+        })()
+
+    monkeypatch.setattr(_paper_intake, "resolve_ams_landing_url", lambda _: None, raising=False)
+    monkeypatch.setattr(_paper_intake, "fetch_pdf", fake_fetch_pdf)
+    monkeypatch.setattr(_paper_intake, "pdf_backlog_add", lambda *_, **__: None, raising=False)
+    removed = []
+    monkeypatch.setattr(_paper_intake, "pdf_backlog_remove", lambda doi: removed.append(doi), raising=False)
+
+    main(["reindex", "--force"])
+    capsys.readouterr()
+
+    rc = main(["backfill-pdfs", "--citekey", "Miyawaki2024Attention"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "attached\tMiyawaki2024Attention" in out
+    assert "attached=1" in out
+    assert fetched == [
+        (
+            "10.1175/JCLI-D-23-0456.1",
+            "https://doi.org/10.1175/JCLI-D-23-0456.1",
+            "Attention and convection",
+        )
+    ]
+    r = cli_env.load("Miyawaki2024Attention")
+    assert [a.kind for a in r.attachments] == ["supplement", "main"]
+    assert (cli_env.root / r.attachments[-1].path).read_bytes().startswith(b"%PDF-1.4")
+    assert removed == ["10.1175/JCLI-D-23-0456.1"]
+
+
 def test_backfill_pdfs_dry_run_lists_candidates(cli_env, monkeypatch, capsys):
     from glean import _paper_intake
 
     fetched = []
     monkeypatch.setattr(_paper_intake, "fetch_pdf", lambda *args, **kwargs: fetched.append(args), raising=False)
 
-    rc = main(["backfill-pdfs", "--dry-run", "--limit", "2"])
+    rc = main(["backfill-pdfs", "--dry-run", "--limit", "3"])
 
     out = capsys.readouterr().out
     assert rc == 0
-    assert "dry-run: 2 record(s) would be attempted" in out
+    assert "dry-run: 3 record(s) would be attempted" in out
     assert "Arakawa1974Schubert" in out
-    assert "Miyawaki2024Attention" not in out
+    assert "Miyawaki2024Attention" in out
     assert fetched == []
 
 
