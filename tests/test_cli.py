@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -464,6 +465,26 @@ def test_backfill_pdfs_fetches_when_main_attachment_file_is_missing(cli_env, mon
     assert [a.kind for a in r.attachments] == ["supplement", "main"]
     assert (cli_env.root / r.attachments[-1].path).read_bytes().startswith(b"%PDF-1.4")
     assert removed == ["10.1175/JCLI-D-23-0456.1"]
+
+
+def test_backfill_pdfs_with_citekey_does_not_require_full_index_refresh(
+    cli_env,
+    monkeypatch,
+    capsys,
+):
+    from glean.cli import Index
+
+    def locked_refresh(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Index, "refresh", locked_refresh)
+
+    rc = main(["backfill-pdfs", "--citekey", "Arakawa1974Schubert", "--dry-run"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "dry-run: 1 record(s) would be attempted" in out
+    assert "Arakawa1974Schubert" in out
 
 
 def test_backfill_pdfs_dry_run_lists_candidates(cli_env, monkeypatch, capsys):

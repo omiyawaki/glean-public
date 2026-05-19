@@ -686,19 +686,20 @@ def _missing_main_pdf_records(lib: Library) -> list[Record]:
 def cmd_backfill_pdfs(args: argparse.Namespace) -> int:
     lib = _library()
     idx = _index(lib)
-    idx.refresh()
 
     if args.limit is not None and args.limit < 0:
         _err("--limit must be non-negative")
         return 6
 
     if args.citekey:
+        idx.connect()
         if not lib.exists(args.citekey):
             _err(f"not found: {args.citekey}")
             return 1
         record = lib.load(args.citekey)
         records = [record] if _record_missing_readable_main_pdf(lib, record) else []
     else:
+        idx.refresh()
         records = _missing_main_pdf_records(lib)
 
     if args.limit is not None:
