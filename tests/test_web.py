@@ -1,7 +1,15 @@
 from pathlib import Path
+import gzip
+import json
 
 from glean.store import Library
-from glean.web import _record_detail, _refresh_index
+from glean.web import (
+    _json_response,
+    _list_delta,
+    _record_detail,
+    _refresh_index,
+    _versioned_list_body,
+)
 
 
 class RefreshingIndex:
@@ -59,3 +67,74 @@ def test_record_detail_retries_transient_deadlock(lib: Library, monkeypatch):
     assert detail is not None
     assert detail["citekey"] == "Miyawaki2024Attention"
     assert calls == 1
+
+
+def test_json_response_sets_etag_and_supports_not_modified():
+    status, headers, body = _json_response(
+        {"count": 0, "entries": []},
+        request_headers={},
+    )
+
+    assert status == 200
+    assert headers["ETag"]
+    assert json.loads(body.decode("utf-8")) == {"count": 0, "entries": []}
+
+    status, not_modified_headers, not_modified_body = _json_response(
+        {"count": 0, "entries": []},
+        request_headers={"If-None-Match": headers["ETag"]},
+    )
+
+    assert status == 304
+    assert not_modified_headers["ETag"] == headers["ETag"]
+    assert not_modified_body == b""
+
+
+def test_json_response_gzips_when_client_accepts_gzip():
+    status, headers, body = _json_response(
+        {"entries": [{"title": "x" * 1024}]},
+        request_headers={"Accept-Encoding": "br, gzip"},
+    )
+
+    assert status == 200
+    assert headers["Content-Encoding"] == "gzip"
+    decoded = gzip.decompress(body)
+    assert json.loads(decoded.decode("utf-8"))["entries"][0]["title"] == "x" * 1024
+
+
+def test_versioned_list_body_includes_stable_version():
+    entries = [
+        {"citekey": "A", "title": "A", "year": 2026, "doi": None, "authors": []},
+    ]
+
+    body = _versioned_list_body(entries)
+
+    assert body["count"] == 1
+    assert body["entries"] == entries
+    assert body["version"]
+    assert body["etag"] == body["version"]
+
+
+def test_list_delta_returns_empty_when_since_matches_current_version():
+    entries = [
+        {"citekey": "A", "title": "A", "year": 2026, "doi": None, "authors": []},
+    ]
+    current = _versioned_list_body(entries)
+
+    delta = _list_delta(entries, since=current["version"])
+
+    assert delta["count"] == 0
+    assert delta["entries"] == []
+    assert delta["unchanged"] is True
+    assert delta["version"] == current["version"]
+
+
+def test_list_delta_returns_snapshot_when_version_changed():
+    entries = [
+        {"citekey": "A", "title": "A", "year": 2026, "doi": None, "authors": []},
+    ]
+
+    delta = _list_delta(entries, since="old")
+
+    assert delta["count"] == 1
+    assert delta["entries"] == entries
+    assert delta["unchanged"] is False

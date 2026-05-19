@@ -13,11 +13,14 @@ the expensive thing — see PARKED.md on the dual-mtime fix.)
 from __future__ import annotations
 
 import http.server
+import gzip
+import hashlib
 import json
 import socketserver
 import sys
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 from glean.index import Index
@@ -36,7 +39,7 @@ def _refresh_index(idx: Index, *, phase: str) -> bool:
     return True
 
 
-def _list_papers(idx: Index) -> dict:
+def _list_entries(idx: Index) -> list[dict]:
     """All records for the library browse view, joined with authors."""
     conn = idx.connect()
     rows = conn.execute(
@@ -57,7 +60,90 @@ def _list_papers(idx: Index) -> dict:
             "doi": doi,
             "authors": by_ck.get(ck, []),
         })
-    return {"count": len(entries), "entries": entries}
+    return entries
+
+
+def _version_for_entries(entries: list[dict]) -> str:
+    payload = json.dumps(
+        entries,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _versioned_list_body(entries: list[dict]) -> dict:
+    version = _version_for_entries(entries)
+    return {
+        "count": len(entries),
+        "entries": entries,
+        "version": version,
+        "etag": version,
+    }
+
+
+def _list_papers(idx: Index) -> dict:
+    return _versioned_list_body(_list_entries(idx))
+
+
+def _list_delta(entries: list[dict], *, since: str | None) -> dict:
+    current = _versioned_list_body(entries)
+    if since and since == current["version"]:
+        return {
+            "count": 0,
+            "entries": [],
+            "version": current["version"],
+            "etag": current["etag"],
+            "unchanged": True,
+        }
+    current["unchanged"] = False
+    return current
+
+
+def _json_response(
+    body: dict | list,
+    *,
+    request_headers,
+    status: int = 200,
+) -> tuple[int, dict[str, str], bytes]:
+    payload = json.dumps(
+        body,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    etag = '"' + hashlib.sha256(payload).hexdigest() + '"'
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "ETag": etag,
+        "Cache-Control": "no-cache",
+        "Vary": "Accept-Encoding",
+    }
+    if status == 200 and _header_value(request_headers, "If-None-Match") == etag:
+        return 304, headers, b""
+    if _accepts_gzip(request_headers):
+        payload = gzip.compress(payload)
+        headers["Content-Encoding"] = "gzip"
+    headers["Content-Length"] = str(len(payload))
+    return status, headers, payload
+
+
+def _header_value(headers, name: str) -> str | None:
+    value = headers.get(name)
+    if value is None and isinstance(headers, dict):
+        lower_name = name.lower()
+        for key, candidate in headers.items():
+            if key.lower() == lower_name:
+                value = candidate
+                break
+    return value
+
+
+def _accepts_gzip(headers) -> bool:
+    encoding = _header_value(headers, "Accept-Encoding") or ""
+    return "gzip" in {item.split(";", 1)[0].strip().lower()
+                      for item in encoding.split(",")}
 
 
 def _record_detail(lib: Library, citekey: str) -> dict | None:
@@ -112,20 +198,30 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def _json(self, status: int, body: dict | list) -> None:
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
+            response_status, headers, payload = _json_response(
+                body,
+                request_headers=self.headers,
+                status=status,
+            )
+            self.send_response(response_status)
+            for key, value in headers.items():
+                self.send_header(key, value)
             self.end_headers()
-            self.wfile.write(payload)
+            if payload:
+                self.wfile.write(payload)
 
         def do_GET(self) -> None:
-            if self.path == "/health":
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/health":
                 return self._json(200, {"ok": True})
-            if self.path == "/api/papers":
+            if parsed.path == "/api/papers":
                 return self._json(200, _list_papers(idx))
-            if self.path.startswith("/api/papers/"):
-                citekey = self.path[len("/api/papers/"):]
+            if parsed.path == "/api/papers/delta":
+                query = urllib.parse.parse_qs(parsed.query)
+                since = query.get("since", [None])[0]
+                return self._json(200, _list_delta(_list_entries(idx), since=since))
+            if parsed.path.startswith("/api/papers/"):
+                citekey = urllib.parse.unquote(parsed.path[len("/api/papers/"):])
                 detail = _record_detail(lib, citekey)
                 if detail is None:
                     return self._json(404, {"error": "not found"})
