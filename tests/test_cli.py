@@ -372,6 +372,37 @@ def test_add_arxiv_preprint(cli_env, monkeypatch, capsys):
     assert r.arxiv == "2401.99999"
 
 
+def test_add_crossref_preprint_doi(cli_env, monkeypatch, capsys):
+    _patch_paper_intake(
+        monkeypatch,
+        doi="10.22541/essoar.15002298/v1",
+        meta={
+            "title": "Basin-wide sea-surface observations",
+            "authors": "Medvedev, Andrei",
+            "journal": "",
+            "abstract": "",
+            "year": "2026",
+        },
+    )
+    from glean import _paper_intake
+    monkeypatch.setattr(
+        _paper_intake,
+        "is_preprint_doi",
+        lambda doi: doi.startswith("10.22541/"),
+        raising=False,
+    )
+
+    main(["reindex", "--force"])
+    capsys.readouterr()
+    rc = main(["add", "10.22541/essoar.15002298/v1"])
+
+    out = capsys.readouterr().out.strip()
+    assert rc == 0
+    r = cli_env.load(out)
+    assert r.type == "preprint"
+    assert r.arxiv is None
+
+
 def test_add_quiet_suppresses_stdout(cli_env, monkeypatch, capsys):
     _patch_paper_intake(monkeypatch, doi=None)
     rc = main(["add", "nonsense", "--quiet"])
@@ -570,6 +601,47 @@ def test_backfill_pdfs_fetch_exception_does_not_queue_backlog(cli_env, monkeypat
     assert "failed\tArakawa1974Schubert" in out
     assert "failed=1" in out
     assert backlog_calls == []
+
+
+def test_backfill_pdfs_marks_no_candidates_as_failed_attempt(cli_env, monkeypatch, capsys):
+    from glean import _paper_intake
+
+    backlog_calls = []
+    monkeypatch.setattr(_paper_intake, "resolve_ams_landing_url", lambda _: None, raising=False)
+    monkeypatch.setattr(
+        _paper_intake,
+        "fetch_pdf",
+        lambda *_, **__: type("FetchResult", (), {
+            "filename": None,
+            "candidate_label": None,
+            "tried": [],
+            "reason": "no candidates",
+        })(),
+    )
+    monkeypatch.setattr(
+        _paper_intake,
+        "pdf_backlog_add",
+        lambda doi, **kwargs: backlog_calls.append((doi, kwargs)),
+    )
+
+    main(["reindex", "--force"])
+    capsys.readouterr()
+
+    rc = main(["backfill-pdfs", "--citekey", "Arakawa1974Schubert"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "queued\tArakawa1974Schubert" in out
+    assert backlog_calls == [
+        (
+            "10.1175/1520-0469(1974)031<0674:IOACCE>2.0.CO;2",
+            {
+                "title": "Interaction of a cumulus cloud ensemble with the large-scale environment",
+                "citekey": "Arakawa1974Schubert",
+                "tried": ["no-candidates"],
+            },
+        )
+    ]
 
 
 def test_backfill_pdfs_reuses_one_fetcher_for_batch(cli_env, monkeypatch, capsys):

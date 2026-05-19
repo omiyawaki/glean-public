@@ -39,6 +39,12 @@ def resolve_ams_landing_url(doi: str) -> Optional[str]:
     return _fn(doi)
 
 
+def is_preprint_doi(doi: str) -> bool:
+    _ensure_on_path()
+    from resolver import is_preprint_doi as _fn
+    return bool(_fn(doi))
+
+
 def fetch_pdf(
     doi: str,
     publisher_url: str,

@@ -481,7 +481,9 @@ def cmd_add(args: argparse.Namespace) -> int:
         return 6
 
     is_arxiv = doi.startswith("10.48550/arXiv.")
-    record_type = "preprint" if is_arxiv else "journal-article"
+    record_type = (
+        "preprint" if _paper_intake.is_preprint_doi(doi) else "journal-article"
+    )
     arxiv = doi.split("arXiv.", 1)[1] if is_arxiv else None
 
     existing_citekeys = {
@@ -671,6 +673,9 @@ def _try_fetch_pdf_for_record(
                 dir_path=str(staging),
             )
             tried = list(getattr(result, "tried", []) or [])
+            reason = getattr(result, "reason", "") or ""
+            if not tried and reason == "no candidates":
+                tried = ["no-candidates"]
         except Exception as exc:
             if not quiet:
                 _err(f"warning: PDF fetch failed for {doi}: {exc}")
