@@ -204,13 +204,24 @@ def _have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
+def _oneline(s: object) -> str:
+    """Collapse internal whitespace (newlines, tabs, runs of spaces) to single
+    spaces so a value is safe to embed in a tab-delimited, newline-joined line.
+    Some records (e.g. IPCC reports) carry literal newlines inside the title,
+    which would otherwise split one logical row across several physical lines."""
+    return " ".join(str(s).split())
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     lib = _library()
     idx = _ensure_indexed(lib)
     hits = idx.search(args.query, limit=args.limit)
     if not hits:
         return 1
-    lines = [f"{ck}\t{title}\t{authors}\t{year or ''}" for ck, title, authors, year in hits]
+    lines = [
+        f"{_oneline(ck)}\t{_oneline(title)}\t{_oneline(authors)}\t{year or ''}"
+        for ck, title, authors, year in hits
+    ]
     blob = "\n".join(lines)
     if _have("fzf"):
         try:
@@ -225,7 +236,10 @@ def cmd_search(args: argparse.Namespace) -> int:
     for line in blob.split("\n"):
         if not line.strip():
             continue
-        ck, title, authors, year = line.split("\t")
+        parts = line.split("\t", 3)
+        if len(parts) < 4:
+            parts += [""] * (4 - len(parts))
+        ck, title, authors, year = parts
         print(f"{ck:<40} [{year}]  {authors[:40]:<40}  {title[:80]}")
     return 0
 

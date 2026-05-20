@@ -265,14 +265,29 @@ class Index:
                         "INSERT OR IGNORE INTO stubs(citekey) VALUES (?)", (t,)
                     )
 
+    @staticmethod
+    def _match_query(query: str) -> str:
+        """Build a safe FTS5 MATCH string from free-text input.
+
+        Each whitespace-delimited token is wrapped as a quoted phrase so FTS5
+        query operators in user input (-, :, *, ^, parentheses, AND/OR/NOT, and
+        bare double quotes) match literally instead of being parsed as syntax.
+        Without this, a query like "well-mixed" is read as a column filter and
+        aborts with 'no such column: mixed'."""
+        tokens = query.split()
+        return " ".join('"' + tok.replace('"', '""') + '"' for tok in tokens)
+
     def search(self, query: str, limit: int = 50) -> list[tuple[str, str, str, Optional[int]]]:
         """Return (citekey, title, authors_flat, year) rows ranked by FTS5."""
+        match = self._match_query(query)
+        if not match:
+            return []
         conn = self.connect()
         rows = conn.execute(
             "SELECT f.citekey, f.title, f.authors_flat, r.year "
             "FROM fts f JOIN records r ON r.citekey = f.citekey "
             "WHERE fts MATCH ? ORDER BY rank LIMIT ?",
-            (query, limit),
+            (match, limit),
         ).fetchall()
         return list(rows)
 

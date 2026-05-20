@@ -75,6 +75,22 @@ def test_search_by_tag(index: Index, lib: Library):
     assert [h[0] for h in hits] == ["Miyawaki2024Attention"]
 
 
+def test_search_hyphenated_query_does_not_crash(index: Index):
+    # A hyphen must be matched literally, not parsed as an FTS5 operator.
+    # Regression: raised sqlite3.OperationalError "no such column: scale".
+    index.rebuild()
+    citekeys = {h[0] for h in index.search("large-scale")}
+    assert "Arakawa1974Schubert" in citekeys
+    assert "Vallis2019AOFD" in citekeys
+
+
+def test_match_query_quotes_special_tokens():
+    assert Index._match_query("well-mixed") == '"well-mixed"'
+    assert Index._match_query("ocean heat") == '"ocean" "heat"'
+    assert Index._match_query('foo"bar') == '"foo""bar"'
+    assert Index._match_query("   ") == ""
+
+
 def test_outgoing_resolves_doi_and_citekey(index: Index):
     index.rebuild()
     out = index.outgoing("Miyawaki2024Attention")

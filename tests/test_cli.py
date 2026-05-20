@@ -885,3 +885,29 @@ def test_graph_fetch_populates_refs(cli_env, monkeypatch):
     assert rc == 0
     r = cli_env.load("Arakawa1974Schubert")
     assert r.references == ["10.1111/xx", "10.2222/yy"]
+
+
+def test_oneline_collapses_whitespace():
+    from glean.cli import _oneline
+
+    assert _oneline("a\nb\tc  d") == "a b c d"
+    assert _oneline("  trimmed \n ") == "trimmed"
+
+
+def test_search_title_with_newline_does_not_crash(cli_env, capsys, monkeypatch):
+    # A literal newline inside a field must not split one result across
+    # physical lines and break the tab-unpack. Regression: ValueError
+    # "not enough values to unpack (expected 4, got 3)".
+    import glean.cli as cli
+
+    monkeypatch.setattr(cli, "_have", lambda cmd: False)  # deterministic: no fzf
+    r = cli_env.load("Miyawaki2024Attention")
+    r.title = "Multiline\ntitle here"
+    cli_env.save(r)
+
+    rc = main(["search", "Multiline"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Miyawaki2024Attention" in out
+    assert "Multiline title here" in out  # newline collapsed to a space
