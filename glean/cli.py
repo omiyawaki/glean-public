@@ -451,16 +451,19 @@ def cmd_add(args: argparse.Namespace) -> int:
     existing = conn.execute(
         "SELECT citekey FROM records WHERE lower(doi) = lower(?)", (doi,)
     ).fetchone()
-    if existing and lib.exists(existing[0]):
-        print(existing[0])
-        return 4
     if existing:
-        # The index points at a citekey whose YAML is missing on disk —
-        # treat the index as stale and fall through to a fresh add. The
-        # reindex at the end of this command will purge the orphan row.
+        if lib.exists(existing[0]):
+            print(existing[0])
+            return 4
+        # The index points at a citekey whose YAML is missing on disk. Refresh
+        # before generating a citekey so the orphan row cannot influence the new
+        # record or survive beside it.
         if not args.quiet:
-            _err(f"warning: stale index entry for {existing[0]} "
-                 f"(yaml missing); re-creating record")
+            _err(
+                f"warning: stale index entry for {existing[0]} "
+                f"(yaml missing); re-creating record"
+            )
+        idx.refresh()
 
     meta = _paper_intake.crossref_metadata(doi)
     if not meta:

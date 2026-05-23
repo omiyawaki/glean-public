@@ -229,6 +229,31 @@ def test_add_duplicate_detects_doi_case_mismatch(cli_env, monkeypatch, capsys):
     assert out == "Miyawaki2024Attention"
 
 
+def test_add_recreates_record_when_duplicate_index_row_is_stale(cli_env, monkeypatch, capsys):
+    _patch_paper_intake(
+        monkeypatch,
+        doi="10.1175/JCLI-D-23-0456.1",
+        meta={
+            "title": "Attention and convection",
+            "authors": "Miyawaki, Osamu\nVallis, Geoffrey",
+            "journal": "Journal of Climate",
+            "abstract": "",
+            "year": "2024",
+        },
+    )
+    main(["reindex", "--force"])
+    capsys.readouterr()
+    cli_env.delete("Miyawaki2024Attention")
+
+    rc = main(["add", "10.1175/JCLI-D-23-0456.1"])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out.strip() == "Miyawaki2024Attention"
+    assert "warning: stale index entry for Miyawaki2024Attention" in captured.err
+    assert cli_env.exists("Miyawaki2024Attention")
+
+
 def test_add_success(cli_env, monkeypatch, capsys):
     _patch_paper_intake(
         monkeypatch,
