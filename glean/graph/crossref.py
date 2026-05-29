@@ -12,6 +12,11 @@ from typing import Callable, Optional
 
 import httpx
 
+# Use the same markup stripper as the main intake path so that titles
+# containing <scp>, <jats:...>, etc. from Crossref deposits are cleaned
+# consistently whether they arrive via "glean add" or graph reference fetch.
+from glean import _paper_intake
+
 
 CACHE_ROOT = Path("~/Library/Caches/glean/crossref").expanduser()
 DEFAULT_TTL_DAYS = 30
@@ -58,7 +63,8 @@ def _default_http_get(url: str) -> Optional[dict]:
 
 
 def _normalize_metadata(msg: dict) -> dict:
-    title = (msg.get("title") or [""])[0]
+    raw_title = (msg.get("title") or [""])[0]
+    title = _paper_intake.strip_markup(raw_title)
     authors = []
     for a in msg.get("author") or []:
         fam = (a.get("family") or "").strip()

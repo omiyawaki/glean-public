@@ -33,6 +33,16 @@ def crossref_metadata(doi: str) -> Optional[dict]:
     return _fn(doi)
 
 
+def strip_markup(text: str) -> str:
+    """Remove JATS/HTML markup (<scp>, <jats:..., <i>, etc.) from titles/abstracts
+    and normalize. Re-exported so glean internals (graph fetch, etc.) can use
+    the same logic as the main intake path.
+    """
+    _ensure_on_path()
+    from resolver import strip_markup as _fn
+    return _fn(text)
+
+
 def resolve_ams_landing_url(doi: str) -> Optional[str]:
     _ensure_on_path()
     from pdf_fetch import resolve_ams_landing_url as _fn
