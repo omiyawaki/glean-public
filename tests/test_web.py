@@ -1,11 +1,17 @@
 from pathlib import Path
 import gzip
 import json
+import threading
+import time
 
+from glean.index import Index
+from glean.schema import Author, Record
 from glean.store import Library
 from glean.web import (
+    PapersSnapshot,
     _json_response,
     _list_delta,
+    _list_papers,
     _record_detail,
     _refresh_index,
     _versioned_list_body,
@@ -138,3 +144,68 @@ def test_list_delta_returns_snapshot_when_version_changed():
     assert delta["count"] == 1
     assert delta["entries"] == entries
     assert delta["unchanged"] is False
+
+
+def test_papers_snapshot_serves_last_complete_body_during_refresh(tmp_path: Path):
+    lib = Library(tmp_path / "library")
+    first = Record(
+        citekey="Alpha2026First",
+        type="journal-article",
+        title="First",
+        authors=[Author(family="Alpha", given="A.")],
+        year=2026,
+        added_at=None,
+        modified_at=None,
+    )
+    second = Record(
+        citekey="Beta2025Second",
+        type="journal-article",
+        title="Second",
+        authors=[Author(family="Beta", given="B.")],
+        year=2025,
+        added_at=None,
+        modified_at=None,
+    )
+    lib.save(first)
+    index = Index(lib, tmp_path / "index.sqlite")
+    _refresh_index(index, phase="startup")
+    snapshot = PapersSnapshot.from_index(index)
+    assert snapshot.body()["count"] == 1
+
+    lib.save(second)
+    second_row_inserted = threading.Event()
+    finish_refresh = threading.Event()
+    original_upsert = index._upsert
+
+    def slow_upsert(record):
+        original_upsert(record)
+        if record.citekey == "Beta2025Second":
+            second_row_inserted.set()
+            assert finish_refresh.wait(timeout=2)
+
+    index._upsert = slow_upsert
+    refresh_thread = threading.Thread(
+        target=lambda: snapshot.refresh_from_index(index, phase="background")
+    )
+    refresh_thread.start()
+    assert second_row_inserted.wait(timeout=2)
+
+    start = time.perf_counter()
+    during_refresh = snapshot.body()
+    elapsed = time.perf_counter() - start
+    assert elapsed < 0.05
+    assert during_refresh["count"] == 1
+    assert [entry["citekey"] for entry in during_refresh["entries"]] == [
+        "Alpha2026First",
+    ]
+
+    finish_refresh.set()
+    refresh_thread.join(timeout=2)
+    assert not refresh_thread.is_alive()
+
+    after_refresh = snapshot.body()
+    assert after_refresh["count"] == 2
+    assert [entry["citekey"] for entry in after_refresh["entries"]] == [
+        "Alpha2026First",
+        "Beta2025Second",
+    ]

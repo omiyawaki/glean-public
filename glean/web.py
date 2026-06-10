@@ -89,6 +89,10 @@ def _list_papers(idx: Index) -> dict:
 
 def _list_delta(entries: list[dict], *, since: str | None) -> dict:
     current = _versioned_list_body(entries)
+    return _delta_for_body(current, since=since)
+
+
+def _delta_for_body(current: dict, *, since: str | None) -> dict:
     if since and since == current["version"]:
         return {
             "count": 0,
@@ -97,8 +101,37 @@ def _list_delta(entries: list[dict], *, since: str | None) -> dict:
             "etag": current["etag"],
             "unchanged": True,
         }
+    current = dict(current)
     current["unchanged"] = False
     return current
+
+
+class PapersSnapshot:
+    """Published /api/papers response from the last complete index refresh."""
+
+    def __init__(self, body: dict) -> None:
+        self._body = body
+        self._lock = threading.RLock()
+
+    @classmethod
+    def from_index(cls, idx: Index) -> "PapersSnapshot":
+        return cls(_list_papers(idx))
+
+    def body(self) -> dict:
+        with self._lock:
+            return self._body
+
+    def delta(self, *, since: str | None) -> dict:
+        with self._lock:
+            return _delta_for_body(self._body, since=since)
+
+    def refresh_from_index(self, idx: Index, *, phase: str) -> bool:
+        if not _refresh_index(idx, phase=phase):
+            return False
+        body = _list_papers(idx)
+        with self._lock:
+            self._body = body
+        return True
 
 
 def _json_response(
@@ -117,7 +150,7 @@ def _json_response(
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "ETag": etag,
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-store",
         "Vary": "Accept-Encoding",
     }
     if status == 200 and _header_value(request_headers, "If-None-Match") == etag:
@@ -180,13 +213,18 @@ def _record_detail(lib: Library, citekey: str) -> dict | None:
     }
 
 
-def _start_refresh_thread(idx: Index) -> None:
+def _start_refresh_thread(idx: Index, snapshot: PapersSnapshot) -> None:
     """Background daemon that re-reads YAML mtimes every minute so the
-    API serves fresh data without paying refresh() cost on each request."""
+    API serves fresh data without paying refresh() cost on each request.
+
+    Requests serve an immutable response snapshot from the last complete
+    refresh, so they neither block behind the slow YAML scan nor observe the
+    SQLite index while it is being updated row-by-row.
+    """
     def loop() -> None:
         while True:
-            _refresh_index(idx, phase="background")
             time.sleep(REFRESH_INTERVAL_S)
+            snapshot.refresh_from_index(idx, phase="background")
     threading.Thread(target=loop, daemon=True, name="glean-web-refresh").start()
 
 
@@ -194,7 +232,8 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
     lib = Library(Path.home() / "Documents" / "glean")
     idx = Index(lib, Path.home() / "Library" / "Caches" / "glean" / "index.sqlite")
     _refresh_index(idx, phase="startup")
-    _start_refresh_thread(idx)
+    snapshot = PapersSnapshot.from_index(idx)
+    _start_refresh_thread(idx, snapshot)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def _json(self, status: int, body: dict | list) -> None:
@@ -215,11 +254,14 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
             if parsed.path == "/health":
                 return self._json(200, {"ok": True})
             if parsed.path == "/api/papers":
-                return self._json(200, _list_papers(idx))
+                return self._json(200, snapshot.body())
             if parsed.path == "/api/papers/delta":
                 query = urllib.parse.parse_qs(parsed.query)
                 since = query.get("since", [None])[0]
-                return self._json(200, _list_delta(_list_entries(idx), since=since))
+                return self._json(
+                    200,
+                    snapshot.delta(since=since),
+                )
             if parsed.path.startswith("/api/papers/"):
                 citekey = urllib.parse.unquote(parsed.path[len("/api/papers/"):])
                 detail = _record_detail(lib, citekey)
