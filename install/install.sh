@@ -1,29 +1,22 @@
 #!/bin/bash
-# Install glean into its own pipx-managed venv and expose the CLI on PATH.
+# Install glean in the shared Pixi tools environment and verify the CLI.
 # Run from the repo root: ./install/install.sh
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/.." && pwd)"
+MANIFEST="$HOME/tools/bringup/python-env"
 
-command -v pipx >/dev/null || {
-    echo "pipx not found. Install with:  brew install pipx  && pipx ensurepath"
+command -v pixi >/dev/null || {
+    echo "Pixi not found on PATH. Install it with: brew install pixi"
     exit 1
 }
 
-PY_DEFAULT="$HOME/mamba/envs/meteo/bin/python"
-PY="${PYTHON:-$PY_DEFAULT}"
-[ -x "$PY" ] || { echo "Python not found at $PY; set PYTHON= or install it."; exit 1; }
+[ -f "$MANIFEST/pixi.toml" ] || {
+    echo "Shared Pixi workspace not found at $MANIFEST"
+    exit 1
+}
 
-"$PY" -c 'import sys; assert sys.version_info >= (3, 11), sys.version' \
-    || { echo "Need Python 3.11+; got $("$PY" --version)"; exit 1; }
-
-pipx install --python "$PY" --force -e "$REPO"
-PIPX_HOME="$(pipx environment --value PIPX_HOME 2>/dev/null || true)"
-GLEAN_PY="$PIPX_HOME/venvs/glean/bin/python"
-if [ -x "$GLEAN_PY" ]; then
-    "$GLEAN_PY" -m playwright install chromium
-else
-    echo "Could not locate the glean pipx venv; run 'python -m playwright install chromium' inside it before PDF fetching."
-fi
+pixi install --manifest-path "$MANIFEST" --environment tools --locked
+pixi run --manifest-path "$MANIFEST" --environment tools \
+    python -m playwright install chromium
+pixi run --manifest-path "$MANIFEST" --environment tools glean --help >/dev/null
 echo
 echo "Done. Verify with:  glean --help"
