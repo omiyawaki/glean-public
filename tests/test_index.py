@@ -1,6 +1,8 @@
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from glean.index import Index
 from glean.schema import Author, Record
 from glean.store import Library
@@ -145,6 +147,60 @@ def test_refresh_detects_deletions(index: Index, lib: Library):
     conn = index.connect()
     n = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
     assert n == 4
+
+
+def test_refresh_refuses_to_clear_index_after_empty_library_scan(
+    index: Index,
+    lib: Library,
+    monkeypatch,
+):
+    index.rebuild()
+    monkeypatch.setattr(lib, "scan_records", lambda: ([], set()))
+
+    with pytest.raises(RuntimeError, match="refusing to delete the entire index"):
+        index.refresh()
+
+    n = index.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0]
+    assert n == 5
+
+
+def test_refresh_preserves_existing_rows_for_unavailable_placeholders(
+    index: Index,
+    lib: Library,
+    monkeypatch,
+):
+    index.rebuild()
+    records, _ = lib.scan_records()
+    unavailable = records[0].citekey
+    monkeypatch.setattr(
+        lib,
+        "scan_records",
+        lambda: (records[1:], {unavailable}),
+    )
+
+    assert index.refresh() == (0, 0, 0)
+    n = index.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0]
+    assert n == 5
+
+
+def test_rebuild_refuses_incomplete_file_provider_scan(
+    index: Index,
+    lib: Library,
+    monkeypatch,
+):
+    index.rebuild()
+    records, _ = lib.scan_records()
+    monkeypatch.setattr(
+        lib,
+        "scan_records",
+        lambda: (records[1:], {records[0].citekey}),
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete index"):
+        index.rebuild()
+
+    n = index.connect().execute("SELECT COUNT(*) FROM records").fetchone()[0]
+    assert n == 5
 
 
 def test_refresh_detects_additions(index: Index, lib: Library):

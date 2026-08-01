@@ -52,6 +52,7 @@ _TRANSIENT_READ_ERRNOS = {
 }
 _READ_ATTEMPTS = 4
 _READ_RETRY_DELAY_S = 0.05
+_SF_DATALESS = 0x40000000
 
 
 def _yaml() -> YAML:
@@ -290,3 +291,29 @@ class Library:
             return
         for p in sorted(self.records_dir.glob("*.yaml")):
             yield loads(_read_record_text(p))
+
+    def scan_records(self) -> tuple[list[Record], set[str]]:
+        """Read available records and report File Provider placeholders.
+
+        A dataless YAML has a real directory entry but no local content yet.
+        Index refreshes must retain its existing row instead of treating that
+        placeholder as a deleted record. Other transient File Provider read
+        failures receive the normal bounded retry, then receive the same
+        preserve-until-readable treatment.
+        """
+        records: list[Record] = []
+        unavailable: set[str] = set()
+        if not self.records_dir.is_dir():
+            return records, unavailable
+        for path in sorted(self.records_dir.glob("*.yaml")):
+            try:
+                flags = getattr(path.stat(), "st_flags", 0)
+                if flags & _SF_DATALESS:
+                    unavailable.add(path.stem)
+                    continue
+                records.append(loads(_read_record_text(path)))
+            except OSError as exc:
+                if exc.errno not in _TRANSIENT_READ_ERRNOS:
+                    raise
+                unavailable.add(path.stem)
+        return records, unavailable

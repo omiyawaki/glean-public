@@ -134,11 +134,17 @@ class Index:
             self._conn = None
 
     def rebuild(self) -> None:
+        records, unavailable = self.library.scan_records()
+        if unavailable:
+            raise RuntimeError(
+                "refusing to rebuild an incomplete index while "
+                f"{len(unavailable)} library record(s) are unavailable"
+            )
         conn = self.connect()
         with conn:
             for table in ("records", "authors", "keywords", "tags", "attachments", "outgoing", "stubs", "fts"):
                 conn.execute(f"DELETE FROM {table}")
-        for record in self.library.iter_records():
+        for record in records:
             self._upsert(record)
         self._sync_stubs()
 
@@ -149,9 +155,10 @@ class Index:
             row[0]: row[1]
             for row in conn.execute("SELECT citekey, yaml_modified FROM records")
         }
-        seen: set[str] = set()
+        records, unavailable = self.library.scan_records()
+        seen: set[str] = set(unavailable)
         added = updated = 0
-        for record in self.library.iter_records():
+        for record in records:
             seen.add(record.citekey)
             mod_str = record.modified_at.isoformat() if record.modified_at else ""
             if record.citekey not in known:
@@ -160,6 +167,11 @@ class Index:
             elif known[record.citekey] != mod_str:
                 self._upsert(record)
                 updated += 1
+        if known and not seen:
+            raise RuntimeError(
+                "refusing to delete the entire index after the library scan "
+                "returned no records"
+            )
         deleted = 0
         for citekey in known.keys() - seen:
             self._delete(citekey)

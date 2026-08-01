@@ -43,6 +43,24 @@ def test_iter_records_sorted(lib: Library):
     assert citekeys == sorted(citekeys)
 
 
+def test_scan_records_reports_persistent_transient_read_failure(
+    lib: Library,
+    monkeypatch,
+):
+    original_read_text = Path.read_text
+
+    def blocked_read_text(path: Path, *args, **kwargs):
+        if path.name == "Miyawaki2024Attention.yaml":
+            raise OSError(11, "Resource deadlock avoided")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", blocked_read_text)
+    records, unavailable = lib.scan_records()
+
+    assert "Miyawaki2024Attention" in unavailable
+    assert "Miyawaki2024Attention" not in {record.citekey for record in records}
+
+
 def test_round_trip_is_idempotent_in_memory(lib: Library):
     r = lib.load("Miyawaki2024Attention")
     text1 = dumps(r)

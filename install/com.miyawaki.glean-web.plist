@@ -14,8 +14,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/USERNAME/tools/glean/.venv/bin/glean</string>
-        <string>serve</string>
+        <string>/Users/USERNAME/Applications/ToolsPythonRunner.app/Contents/MacOS/ToolsPythonRunner</string>
+        <string>glean-web</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -41,7 +41,5 @@
     <key>StandardErrorPath</key>
     <string>/Users/USERNAME/Library/Logs/glean-web.stderr.log</string>
 
-    <key>LowPriorityIO</key>
-    <true/>
 </dict>
 </plist>
