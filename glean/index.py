@@ -196,7 +196,7 @@ class Index:
             self._conn.executescript(SCHEMA)
             needs_rebuild = self._migrate_schema(self._conn)
             if needs_rebuild:
-                self.rebuild()
+                self._rebuild_for_migration()
         return self._conn
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> bool:
@@ -267,7 +267,14 @@ class Index:
                 """
             )
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        return previous_version < SCHEMA_VERSION
+        record_count = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+        library_work_count = conn.execute(
+            "SELECT COUNT(*) FROM library_works"
+        ).fetchone()[0]
+        return (
+            previous_version < SCHEMA_VERSION
+            or (record_count > 0 and library_work_count == 0)
+        )
 
     def close(self) -> None:
         if self._conn is not None:
@@ -292,6 +299,32 @@ class Index:
         for record in records:
             self._upsert(record)
         self._sync_stubs()
+
+    def _rebuild_for_migration(self) -> None:
+        """Build v2 while retaining index rows for iCloud placeholders.
+
+        Unlike an explicit force rebuild, a schema migration must be able to
+        proceed when a small number of previously indexed YAML files are
+        temporarily dataless. Their old record rows remain queryable and are
+        marked stale so the normal refresh path fills their identities and
+        edges as soon as File Provider materializes them.
+        """
+        records, unavailable = self.library.scan_records()
+        conn = self.connect()
+        with conn:
+            for table in ("citation_edges", "library_works", "work_aliases", "works"):
+                conn.execute(f"DELETE FROM {table}")
+            for record in records:
+                conn.execute("DELETE FROM records WHERE citekey = ?", (record.citekey,))
+                conn.execute("DELETE FROM fts WHERE citekey = ?", (record.citekey,))
+            if unavailable:
+                conn.executemany(
+                    "UPDATE records SET yaml_modified = '__migration_pending__' "
+                    "WHERE citekey = ?",
+                    [(citekey,) for citekey in unavailable],
+                )
+        for record in records:
+            self._upsert(record)
 
     def refresh(self) -> tuple[int, int, int]:
         """Return (added, updated, deleted)."""

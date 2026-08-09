@@ -271,6 +271,41 @@ def test_rebuild_refuses_incomplete_file_provider_scan(
     assert n == 5
 
 
+def test_schema_recovery_preserves_placeholder_rows_until_they_materialize(
+    lib: Library,
+    tmp_path: Path,
+    monkeypatch,
+):
+    db_path = tmp_path / "migration-placeholder.sqlite"
+    initial = Index(lib, db_path)
+    initial.connect()
+    all_records, _ = lib.scan_records()
+    unavailable_record = all_records[0]
+    with initial.connect():
+        for table in ("citation_edges", "library_works", "work_aliases", "works"):
+            initial.connect().execute(f"DELETE FROM {table}")
+    initial.close()
+
+    migrating = Index(lib, db_path)
+    monkeypatch.setattr(
+        lib,
+        "scan_records",
+        lambda: (all_records[1:], {unavailable_record.citekey}),
+    )
+    conn = migrating.connect()
+
+    assert conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 5
+    assert conn.execute("SELECT COUNT(*) FROM library_works").fetchone()[0] == 4
+    assert conn.execute(
+        "SELECT yaml_modified FROM records WHERE citekey = ?",
+        (unavailable_record.citekey,),
+    ).fetchone()[0] == "__migration_pending__"
+
+    monkeypatch.setattr(lib, "scan_records", lambda: (all_records, set()))
+    assert migrating.refresh() == (0, 1, 0)
+    assert conn.execute("SELECT COUNT(*) FROM library_works").fetchone()[0] == 5
+
+
 def test_refresh_detects_additions(index: Index, lib: Library):
     index.rebuild()
     r = Record(
