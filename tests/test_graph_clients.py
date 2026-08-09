@@ -31,13 +31,14 @@ def test_openalex_fetch_combines_main_and_refs(cache_root):
     responses = {
         "https://api.openalex.org/works/doi:10.1/foo?mailto=user@example.com":
             _openalex_work_response("10.1/foo", ["W1", "W2"]),
-        "https://api.openalex.org/works/W1?select=doi,title,publication_year&mailto=user@example.com":
-            {"doi": "https://doi.org/10.2/a"},
-        "https://api.openalex.org/works/W2?select=doi,title,publication_year&mailto=user@example.com":
-            {"doi": "https://doi.org/10.2/b"},
     }
 
     def http_get(url: str):
+        if url.startswith("https://api.openalex.org/works?filter=openalex:"):
+            return {"results": [
+                {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.2/a"},
+                {"id": "https://openalex.org/W2", "doi": "https://doi.org/10.2/b"},
+            ]}
         return responses.get(url)
 
     out = openalex.fetch("10.1/foo", http_get=http_get)
@@ -47,17 +48,22 @@ def test_openalex_fetch_combines_main_and_refs(cache_root):
     assert out["references"] == ["10.2/a", "10.2/b"]
 
 
-def test_openalex_fetch_drops_refs_without_dois(cache_root):
+def test_openalex_fetch_preserves_refs_without_dois(cache_root):
     responses = {
         "https://api.openalex.org/works/doi:10.1/foo?mailto=user@example.com":
             _openalex_work_response("10.1/foo", ["W1", "W2"]),
-        "https://api.openalex.org/works/W1?select=doi,title,publication_year&mailto=user@example.com":
-            {"doi": None},
-        "https://api.openalex.org/works/W2?select=doi,title,publication_year&mailto=user@example.com":
-            {"doi": "https://doi.org/10.2/b"},
     }
-    out = openalex.fetch("10.1/foo", http_get=lambda url: responses.get(url))
-    assert out["references"] == ["10.2/b"]
+
+    def http_get(url: str):
+        if url.startswith("https://api.openalex.org/works?filter=openalex:"):
+            return {"results": [
+                {"id": "https://openalex.org/W1", "doi": None},
+                {"id": "https://openalex.org/W2", "doi": "https://doi.org/10.2/b"},
+            ]}
+        return responses.get(url)
+
+    out = openalex.fetch("10.1/foo", http_get=http_get)
+    assert out["references"] == ["openalex:W1", "10.2/b"]
 
 
 def test_openalex_caches(cache_root):
@@ -65,15 +71,40 @@ def test_openalex_caches(cache_root):
 
     def http_get(url: str):
         calls.append(url)
-        if "W1" in url:
-            return {"doi": "https://doi.org/10.2/a"}
+        if url.startswith("https://api.openalex.org/works?filter=openalex:"):
+            return {"results": [{
+                "id": "https://openalex.org/W1",
+                "doi": "https://doi.org/10.2/a",
+            }]}
         return _openalex_work_response("10.1/foo", ["W1"])
 
     openalex.fetch("10.1/foo", http_get=http_get)
     first = len(calls)
     openalex.fetch("10.1/foo", http_get=http_get)
-    # Second call should be served from cache — no new HTTP hits.
     assert len(calls) == first
+
+
+def test_openalex_batches_reference_metadata(cache_root):
+    calls: list[str] = []
+
+    def http_get(url: str):
+        calls.append(url)
+        if "/works/doi:" in url:
+            return _openalex_work_response(
+                "10.1/foo",
+                [f"W{index}" for index in range(51)],
+            )
+        ids = url.split("filter=openalex:", 1)[1].split("&", 1)[0].split("|")
+        return {"results": [
+            {"id": f"https://openalex.org/{identifier}", "doi": None}
+            for identifier in ids
+        ]}
+
+    out = openalex.fetch("10.1/foo", http_get=http_get)
+
+    batch_calls = [url for url in calls if "filter=openalex:" in url]
+    assert len(batch_calls) == 2
+    assert len(out["references"]) == 51
 
 
 def test_openalex_returns_none_on_http_failure(cache_root):

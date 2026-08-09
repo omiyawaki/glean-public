@@ -1,8 +1,8 @@
 """HTTP API for browsing the glean library.
 
 Designed for consumption by the native macOS frontend (glean.app).
-Read-only for now: list all records, fetch one record. Search comes
-later.
+The paper list and details are read-only. Citation relations expose one
+idempotent retry mutation for failed background enrichment jobs.
 
 The list endpoint queries the SQLite index — fast (~ms for thousands
 of records), independent of YAML reparse cost. A background thread
@@ -24,6 +24,7 @@ import urllib.parse
 from pathlib import Path
 
 from glean.index import Index
+from glean.graph.worker import GraphWorker
 from glean.store import Library
 
 
@@ -234,6 +235,47 @@ def _record_detail_response(lib: Library, citekey: str) -> tuple[int, dict]:
     return 200, detail
 
 
+def _relation_response(idx: Index, citekey: str, relation: str) -> tuple[int, dict]:
+    state = idx.graph_relation_state(citekey)
+    if state is None:
+        return 404, {"error": "not found", "citekey": citekey}
+    if relation == "references":
+        entries = idx.reference_entries(citekey)
+    elif relation == "cited-by":
+        entries = idx.cited_by_entries(citekey)
+    else:
+        raise ValueError(f"unknown relation: {relation}")
+    body = {
+        **state,
+        "relation": relation,
+        "count": len(entries),
+        "entries": entries,
+    }
+    if relation == "cited-by":
+        body["coverage"] = idx.graph_status()
+    return 200, body
+
+
+def _retry_relation(idx: Index, citekey: str) -> tuple[int, dict]:
+    state = idx.graph_relation_state(citekey)
+    if state is None:
+        return 404, {"error": "not found", "citekey": citekey}
+    graph_state = state["graph"]["state"]
+    if graph_state == "unsupported":
+        return 422, {
+            "error": "automatic reference lookup requires a DOI",
+            "code": "unsupported",
+            "citekey": citekey,
+        }
+    if graph_state not in ("complete", "empty"):
+        idx.enqueue_graph_job(citekey, priority=100)
+        state = idx.graph_relation_state(citekey) or state
+    return 202, {
+        **state,
+        "queued": state["graph"]["state"] == "queued",
+    }
+
+
 def _library_health(lib: Library, snapshot: PapersSnapshot) -> tuple[int, dict]:
     """Probe a real YAML record so health reflects Documents access."""
     body = snapshot.body()
@@ -283,12 +325,25 @@ def _start_refresh_thread(idx: Index, snapshot: PapersSnapshot) -> None:
     threading.Thread(target=loop, daemon=True, name="glean-web-refresh").start()
 
 
+def _start_graph_worker(lib: Library, db_path: Path) -> None:
+    """Run one durable enrichment worker owned by the home web service."""
+    def loop() -> None:
+        worker_index = Index(lib, db_path)
+        worker = GraphWorker(lib, worker_index)
+        worker.run_forever()
+
+    threading.Thread(target=loop, daemon=True, name="glean-graph-worker").start()
+
+
 def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
     lib = Library(Path.home() / "Documents" / "glean")
-    idx = Index(lib, Path.home() / "Library" / "Caches" / "glean" / "index.sqlite")
+    db_path = Path.home() / "Library" / "Caches" / "glean" / "index.sqlite"
+    idx = Index(lib, db_path)
     _refresh_index(idx, phase="startup")
+    idx.reconcile_graph_jobs()
     snapshot = PapersSnapshot.from_index(idx)
     _start_refresh_thread(idx, snapshot)
+    _start_graph_worker(lib, db_path)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def _json(self, status: int, body: dict | list) -> None:
@@ -318,9 +373,33 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
                     200,
                     snapshot.delta(since=since),
                 )
+            if parsed.path == "/api/graph/status":
+                return self._json(200, idx.graph_status())
             if parsed.path.startswith("/api/papers/"):
-                citekey = urllib.parse.unquote(parsed.path[len("/api/papers/"):])
+                suffix = parsed.path[len("/api/papers/"):]
+                if suffix.endswith("/references"):
+                    citekey = urllib.parse.unquote(suffix[:-len("/references")])
+                    status, body = _relation_response(idx, citekey, "references")
+                    return self._json(status, body)
+                if suffix.endswith("/cited-by"):
+                    citekey = urllib.parse.unquote(suffix[:-len("/cited-by")])
+                    status, body = _relation_response(idx, citekey, "cited-by")
+                    return self._json(status, body)
+                citekey = urllib.parse.unquote(suffix)
                 status, body = _record_detail_response(lib, citekey)
+                return self._json(status, body)
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            parsed = urllib.parse.urlparse(self.path)
+            prefix = "/api/papers/"
+            suffix = "/references/retry"
+            if parsed.path.startswith(prefix) and parsed.path.endswith(suffix):
+                citekey = urllib.parse.unquote(
+                    parsed.path[len(prefix):-len(suffix)]
+                )
+                status, body = _retry_relation(idx, citekey)
                 return self._json(status, body)
             self.send_response(404)
             self.end_headers()

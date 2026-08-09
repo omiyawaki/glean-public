@@ -39,6 +39,82 @@ class ValidationError(ValueError):
     pass
 
 
+REFERENCE_KIND_ENUM = frozenset({"doi", "openalex", "citekey"})
+REFERENCE_GRAPH_STATUS_ENUM = frozenset({"complete", "empty"})
+
+
+@dataclass(frozen=True)
+class ReferenceID:
+    """Stable, explicitly typed identity for a cited work."""
+
+    kind: str
+    value: str
+
+    def __post_init__(self) -> None:
+        kind = self.kind.strip().lower()
+        value = self.value.strip()
+        if kind not in REFERENCE_KIND_ENUM:
+            raise ValidationError(f"unknown reference kind: {self.kind!r}")
+        if not value:
+            raise ValidationError("reference value is required")
+        if kind == "doi":
+            for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+                if value.lower().startswith(prefix):
+                    value = value[len(prefix):].strip()
+                    break
+        elif kind == "openalex":
+            for prefix in ("https://openalex.org/", "http://openalex.org/", "openalex:"):
+                if value.lower().startswith(prefix):
+                    value = value[len(prefix):].strip()
+                    break
+            value = value.upper()
+        elif kind == "citekey" and value.lower().startswith("citekey:"):
+            value = value[len("citekey:"):].strip()
+        if not value:
+            raise ValidationError("reference value is required")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "value", value)
+
+    @classmethod
+    def parse(cls, value: str | ReferenceID) -> ReferenceID:
+        if isinstance(value, ReferenceID):
+            return value
+        if not isinstance(value, str):
+            raise ValidationError(
+                f"reference must be a string, got {type(value).__name__}"
+            )
+        raw = value.strip()
+        lowered = raw.lower()
+        for kind in REFERENCE_KIND_ENUM:
+            prefix = f"{kind}:"
+            if lowered.startswith(prefix):
+                return cls(kind, raw[len(prefix):])
+        if lowered.startswith(("https://openalex.org/", "http://openalex.org/")):
+            return cls("openalex", raw)
+        if lowered.startswith(("https://doi.org/", "http://doi.org/")) or "/" in raw:
+            return cls("doi", raw)
+        return cls("citekey", raw)
+
+    @property
+    def serialized(self) -> str:
+        return f"{self.kind}:{self.value}"
+
+    @property
+    def legacy_value(self) -> str:
+        return self.serialized if self.kind == "openalex" else self.value
+
+    @property
+    def normalized_value(self) -> str:
+        return self.value.lower() if self.kind == "doi" else self.value
+
+
+@dataclass
+class ReferenceGraphState:
+    status: str
+    providers: list[str]
+    fetched_at: date
+
+
 _TAG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
@@ -109,7 +185,8 @@ class Record:
     attachments: list[Attachment] = field(default_factory=list)
     read: bool = False
     notes: Optional[str] = None
-    references: list[str] = field(default_factory=list)
+    references: list[ReferenceID] = field(default_factory=list)
+    reference_graph: Optional[ReferenceGraphState] = None
     source: Optional[str] = None
     source_fetched_at: Optional[date] = None
 
@@ -144,6 +221,25 @@ def validate(record: Record) -> None:
         if tag in seen_tags:
             raise ValidationError(f"duplicate tag: {tag!r}")
         seen_tags.add(tag)
+
+    seen_references: set[tuple[str, str]] = set()
+    for reference in record.references:
+        if not isinstance(reference, ReferenceID):
+            raise ValidationError("record references must be ReferenceID values")
+        key = (reference.kind, reference.normalized_value)
+        if key in seen_references:
+            raise ValidationError(f"duplicate reference: {reference.serialized!r}")
+        seen_references.add(key)
+    if record.reference_graph is not None:
+        graph = record.reference_graph
+        if graph.status not in REFERENCE_GRAPH_STATUS_ENUM:
+            raise ValidationError(f"invalid reference graph status: {graph.status!r}")
+        if not isinstance(graph.fetched_at, date):
+            raise ValidationError("reference graph fetched_at must be a date")
+        if graph.status == "empty" and record.references:
+            raise ValidationError("empty reference graph cannot contain references")
+        if not graph.providers or any(not provider.strip() for provider in graph.providers):
+            raise ValidationError("reference graph providers are required")
 
     main_count = 0
     for a in record.attachments:

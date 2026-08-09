@@ -105,4 +105,5 @@ def fetch(doi: str, *, http_get: Callable[[str], Optional[dict]] = _default_http
     return {
         "metadata": _normalize_metadata(msg),
         "references": ref_dois,
+        "works": [],
     }

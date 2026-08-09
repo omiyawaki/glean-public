@@ -8,9 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from glean.citekey import looks_like_doi
 from glean.index import Index
-from glean.schema import Record
+from glean.schema import Record, ReferenceID
 from glean.store import Library
 
 
@@ -24,35 +23,24 @@ class Stub:
 
     @property
     def is_doi(self) -> bool:
-        return looks_like_doi(self.target)
+        return ReferenceID.parse(self.target).kind == "doi"
 
 
-def _resolve_target(index: Index, target: str) -> Optional[str]:
+def _resolve_target(index: Index, target: ReferenceID | str) -> Optional[str]:
     """Return a matching in-library citekey for this target, or None for a stub.
     DOI comparison is case-insensitive."""
-    conn = index.connect()
-    if looks_like_doi(target):
-        row = conn.execute(
-            "SELECT citekey FROM records WHERE lower(doi) = lower(?)", (target,)
-        ).fetchone()
-    else:
-        row = conn.execute("SELECT citekey FROM records WHERE citekey = ?", (target,)).fetchone()
-    return row[0] if row else None
+    return index.resolve_reference(ReferenceID.parse(target))
 
 
-def _stub_for(index: Index, target: str) -> Stub:
-    conn = index.connect()
-    if looks_like_doi(target):
-        row = conn.execute(
-            "SELECT title, year, authors_flat FROM stubs WHERE doi = ?", (target,)
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "SELECT title, year, authors_flat FROM stubs WHERE citekey = ?", (target,)
-        ).fetchone()
-    if row:
-        return Stub(target=target, title=row[0], year=row[1], authors_flat=row[2])
-    return Stub(target=target)
+def _stub_for(index: Index, target: ReferenceID | str) -> Stub:
+    reference = ReferenceID.parse(target)
+    title, year, authors_flat = index.reference_metadata(reference)
+    return Stub(
+        target=reference.legacy_value,
+        title=title,
+        year=year,
+        authors_flat=authors_flat,
+    )
 
 
 def outgoing_for(lib: Library, index: Index, citekey: str) -> list[Record | Stub]:
@@ -99,20 +87,26 @@ def unread_cited_by_read(lib: Library, index: Index,
     """
     conn = index.connect()
     rows = conn.execute(
-        "SELECT o.target, COUNT(DISTINCT o.citekey) AS n "
-        "FROM outgoing o JOIN records r ON r.citekey = o.citekey "
+        "SELECT e.target_work_id, COUNT(DISTINCT e.citekey) AS n "
+        "FROM citation_edges e JOIN records r ON r.citekey = e.citekey "
         "WHERE r.read = 1 "
-        "GROUP BY o.target "
+        "AND NOT EXISTS (SELECT 1 FROM library_works lw "
+        "                WHERE lw.work_id = e.target_work_id) "
+        "GROUP BY e.target_work_id "
         "HAVING n >= ? "
-        "ORDER BY n DESC, o.target ASC",
+        "ORDER BY n DESC, e.target_work_id ASC",
         (min_citations,),
     ).fetchall()
     out: list[tuple[Stub, int]] = []
-    for target, n in rows:
-        resolved = _resolve_target(index, target)
-        if resolved is not None:
-            continue
-        out.append((_stub_for(index, target), n))
+    for work_id, n in rows:
+        alias = conn.execute(
+            "SELECT kind, value FROM work_aliases WHERE work_id = ? "
+            "ORDER BY CASE kind WHEN 'doi' THEN 0 WHEN 'openalex' THEN 1 ELSE 2 END "
+            "LIMIT 1",
+            (work_id,),
+        ).fetchone()
+        if alias:
+            out.append((_stub_for(index, ReferenceID(alias[0], alias[1])), n))
     return out
 
 
@@ -125,10 +119,11 @@ def shortest_path(lib: Library, index: Index, a: str, b: str) -> Optional[list[s
     G = nx.DiGraph()
     # Only add edges where the target resolves to an in-library record; stubs
     # are leaves and not useful for pathfinding.
-    for src, target in conn.execute("SELECT citekey, target FROM outgoing"):
-        resolved = _resolve_target(index, target)
-        if resolved:
-            G.add_edge(src, resolved)
+    for src, target in conn.execute(
+        "SELECT e.citekey, lw.citekey FROM citation_edges e "
+        "JOIN library_works lw ON lw.work_id = e.target_work_id"
+    ):
+        G.add_edge(src, target)
     try:
         return nx.shortest_path(G, source=a, target=b)
     except (nx.NodeNotFound, nx.NetworkXNoPath):

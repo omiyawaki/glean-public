@@ -8,9 +8,15 @@ See DESIGN.md "Data model" and "Attachment filenames".
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import errno
+import fcntl
+import hashlib
 import io
+import os
 import re
+import tempfile
+import threading
 import time
 from dataclasses import asdict
 from datetime import date
@@ -21,7 +27,16 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.scalarstring import LiteralScalarString
 
-from glean.schema import Attachment, Author, Record, normalize_tag, normalize_tags, validate
+from glean.schema import (
+    Attachment,
+    Author,
+    Record,
+    ReferenceGraphState,
+    ReferenceID,
+    normalize_tag,
+    normalize_tags,
+    validate,
+)
 
 
 CANONICAL_ORDER = [
@@ -30,7 +45,7 @@ CANONICAL_ORDER = [
     "journal", "volume", "issue", "pages", "publisher", "url",
     "abstract", "keywords", "tags", "attachments",
     "added_at", "modified_at", "read",
-    "notes", "references", "source", "source_fetched_at",
+    "notes", "references", "reference_graph", "source", "source_fetched_at",
 ]
 
 _KIND_SUFFIX = {
@@ -53,6 +68,8 @@ _TRANSIENT_READ_ERRNOS = {
 _READ_ATTEMPTS = 4
 _READ_RETRY_DELAY_S = 0.05
 _SF_DATALESS = 0x40000000
+_MUTATION_LOCKS: dict[str, threading.RLock] = {}
+_MUTATION_LOCKS_GUARD = threading.Lock()
 
 
 def _yaml() -> YAML:
@@ -129,8 +146,17 @@ def _record_to_commented_map(r: Record) -> CommentedMap:
         m["notes"] = _multiline(r.notes)
 
     if r.references:
-        refs = CommentedSeq(list(r.references))
+        refs = CommentedSeq([reference.serialized for reference in r.references])
         m["references"] = refs
+
+    if r.reference_graph is not None:
+        graph = CommentedMap()
+        graph["status"] = r.reference_graph.status
+        providers = CommentedSeq(r.reference_graph.providers)
+        providers.fa.set_flow_style()
+        graph["providers"] = providers
+        graph["fetched_at"] = r.reference_graph.fetched_at
+        m["reference_graph"] = graph
 
     if r.source is not None:
         m["source"] = r.source
@@ -156,6 +182,17 @@ def _record_from_dict(d: dict) -> Record:
     source_fetched_at = d.get("source_fetched_at")
     if isinstance(source_fetched_at, str):
         source_fetched_at = date.fromisoformat(source_fetched_at)
+    graph_raw = d.get("reference_graph")
+    reference_graph = None
+    if graph_raw:
+        fetched_at = graph_raw.get("fetched_at")
+        if isinstance(fetched_at, str):
+            fetched_at = date.fromisoformat(fetched_at)
+        reference_graph = ReferenceGraphState(
+            status=str(graph_raw["status"]),
+            providers=list(graph_raw.get("providers") or []),
+            fetched_at=fetched_at,
+        )
 
     return Record(
         citekey=d["citekey"],
@@ -183,7 +220,8 @@ def _record_from_dict(d: dict) -> Record:
         attachments=attachments,
         read=bool(d.get("read", False)),
         notes=d.get("notes"),
-        references=list(d.get("references") or []),
+        references=[ReferenceID.parse(value) for value in d.get("references") or []],
+        reference_graph=reference_graph,
         source=d.get("source"),
         source_fetched_at=source_fetched_at,
     )
@@ -276,15 +314,68 @@ class Library:
         path = self.path_for(citekey)
         return loads(_read_record_text(path))
 
+    @property
+    def mutation_lock_path(self) -> Path:
+        identity = hashlib.sha256(str(self.root.resolve()).encode("utf-8")).hexdigest()[:16]
+        return Path(tempfile.gettempdir()) / f"glean-{identity}.mutation.lock"
+
+    @contextmanager
+    def mutation_lock(self) -> Iterator[None]:
+        """Serialize library mutations across threads and local processes."""
+        key = str(self.mutation_lock_path)
+        with _MUTATION_LOCKS_GUARD:
+            process_lock = _MUTATION_LOCKS.setdefault(key, threading.RLock())
+        with process_lock:
+            with self.mutation_lock_path.open("a+") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def save(self, record: Record, *, today: Optional[date] = None) -> None:
+        with self.mutation_lock():
+            destination = self.path_for(record.citekey)
+            if destination.is_file():
+                current = loads(_read_record_text(destination))
+                incoming_graph = record.reference_graph
+                current_graph = current.reference_graph
+                if current_graph is not None and (
+                    incoming_graph is None
+                    or current_graph.fetched_at > incoming_graph.fetched_at
+                ):
+                    record.references = current.references
+                    record.reference_graph = current_graph
+            self._save_unlocked(record, today=today)
+
+    def _save_unlocked(self, record: Record, *, today: Optional[date] = None) -> None:
         self.ensure_dirs()
         record.modified_at = today or date.today()
         if record.added_at is None:
             record.added_at = record.modified_at
-        self.path_for(record.citekey).write_text(dumps(record), encoding="utf-8")
+        destination = self.path_for(record.citekey)
+        temporary_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.records_dir,
+                prefix=f".{record.citekey}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                handle.write(dumps(record))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, destination)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
     def delete(self, citekey: str) -> None:
-        self.path_for(citekey).unlink()
+        with self.mutation_lock():
+            self.path_for(citekey).unlink()
 
     def iter_records(self) -> Iterator[Record]:
         if not self.records_dir.is_dir():

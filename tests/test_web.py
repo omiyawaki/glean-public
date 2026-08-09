@@ -15,6 +15,8 @@ from glean.web import (
     _library_health,
     _record_detail,
     _record_detail_response,
+    _relation_response,
+    _retry_relation,
     _refresh_index,
     _versioned_list_body,
 )
@@ -255,3 +257,65 @@ def test_papers_snapshot_serves_last_complete_body_during_refresh(tmp_path: Path
         "Alpha2026First",
         "Beta2025Second",
     ]
+
+
+def test_references_response_is_ordered_and_normalized(lib: Library, tmp_path: Path):
+    index = Index(lib, tmp_path / "relations.sqlite")
+    index.rebuild()
+
+    status, body = _relation_response(index, "Wills2023Citation", "references")
+
+    assert status == 200
+    assert body["source"]["citekey"] == "Wills2023Citation"
+    assert body["count"] == 4
+    assert body["entries"][0]["citekey"] == "Miyawaki2024Attention"
+    assert body["entries"][0]["in_library"] is True
+    assert body["entries"][0]["doi"] == "10.1175/JCLI-D-23-0456.1"
+    assert body["entries"][2]["in_library"] is False
+
+
+def test_cited_by_is_library_only_and_includes_coverage(lib: Library, tmp_path: Path):
+    index = Index(lib, tmp_path / "incoming.sqlite")
+    index.rebuild()
+
+    status, body = _relation_response(
+        index,
+        "Miyawaki2024Attention",
+        "cited-by",
+    )
+
+    assert status == 200
+    assert [entry["citekey"] for entry in body["entries"]] == ["Wills2023Citation"]
+    assert all(entry["in_library"] for entry in body["entries"])
+    assert body["coverage"]["eligible"] == 4
+    assert body["coverage"]["unsupported"] == 1
+
+
+def test_relation_retry_is_idempotent(lib: Library, tmp_path: Path):
+    index = Index(lib, tmp_path / "retry.sqlite")
+    index.rebuild()
+
+    first_status, first = _retry_relation(index, "Miyawaki2024Attention")
+    second_status, second = _retry_relation(index, "Miyawaki2024Attention")
+
+    assert first_status == second_status == 202
+    assert first["queued"] is True
+    assert second["queued"] is True
+    count = index.connect().execute(
+        "SELECT COUNT(*) FROM graph_jobs WHERE citekey = ?",
+        ("Miyawaki2024Attention",),
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_relation_retry_reports_doi_less_records_as_unsupported(
+    lib: Library,
+    tmp_path: Path,
+):
+    index = Index(lib, tmp_path / "unsupported.sqlite")
+    index.rebuild()
+
+    status, body = _retry_relation(index, "Vallis2019AOFD")
+
+    assert status == 422
+    assert body["code"] == "unsupported"

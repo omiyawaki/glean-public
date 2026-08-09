@@ -46,16 +46,23 @@ modified_at: 2026-04-20             # required, ISO date; authoritative for inde
 read: false                         # optional, bool; drives "unread cited by read" query
 notes: |
   Free-form markdown. Survives round-trips through the editor.
-references:                         # outgoing citations; each entry is DOI or citekey
-  - 10.1126/science.1234567         # DOI (contains a "/")
-  - Sellers1965PhysicalClimatology  # citekey (for DOI-less sources like textbooks)
-source: openalex                    # optional, provenance of references field
-source_fetched_at: 2026-04-18       # optional, ISO date
+references:                         # authoritative, explicitly typed identities
+  - doi:10.1126/science.1234567
+  - openalex:W123456789
+  - citekey:Sellers1965PhysicalClimatology
+reference_graph:
+  status: complete                  # complete or empty; absence means not indexed
+  providers: [openalex]
+  fetched_at: 2026-08-09
+source: crossref                    # bibliographic metadata provenance only
+source_fetched_at: 2026-04-18       # graph enrichment never overwrites these
 ```
 
 Enum for `type`: `journal-article`, `preprint`, `book`, `chapter`, `thesis`, `report`, `conference`, `other`. Same names OpenAlex uses, with `preprint` carved out because it matters for supersession logic that paper_intake already does. OpenAlex itself has no `preprint` type, so the importer and graph fetcher detect preprints by DOI prefix (`10.48550/arXiv.*`, `10.21203/*`, `10.1101/*` for bioRxiv, and so on). This logic already lives in `paper_intake/resolver.py` and will be reused, not reimplemented.
 
 Required fields are the six that every record must have to be useful: `citekey`, `type`, `title`, `authors`, `year`, `added_at`. `modified_at` is also required but the store maintains it automatically. Everything else is optional and simply absent when unknown. The importer from Bookends will populate what it can and leave the rest out rather than emitting empty strings.
+
+Legacy bare reference values remain readable: values containing `/` are interpreted as DOIs and other values as citekeys. Any later save rewrites them as typed scalars. JSON export keeps bare DOI/citekey values for compatibility and uses `openalex:` only where no legacy representation exists.
 
 Tags are first-class labels for project and topic grouping. They are stored in `tags:` as a list of lowercase ASCII slugs, normalized by lowercasing, stripping accents, converting non-alphanumeric runs to `-`, and de-duplicating while preserving first-seen order. Examples: `proj-a`, `upper-troposphere`, `field-data`. Missing `tags:` means the record has no tags.
 
@@ -223,11 +230,11 @@ CREATE VIRTUAL TABLE fts USING fts5(
 );
 ```
 
+The version-2 index additionally contains normalized `works`, `work_aliases`, `library_works`, and ordered `citation_edges` tables. DOI, OpenAlex ID, and citekey aliases can therefore converge on one work while bibliography order remains in `citation_edges.ord`. Durable `graph_jobs` rows hold queued/running/retry/failed state; successful status and provider provenance live in YAML and are mirrored on `records` for coverage queries. External titles/authors and their hydration state live only in `works` and are rebuildable. Read-only `outgoing` and `stubs` compatibility views derive the legacy shape for one migration cycle.
+
 The FTS `keywords` column contains both `keywords:` and `tags:` text, so `glean search proj-a` can find records tagged `proj-a`. Exact tag filtering should use `glean ls --tag <tag>`, which normalizes the argument and queries the `tags` table.
 
-Incoming citations for record `R` with DOI `D` and citekey `C` are `SELECT citekey FROM outgoing WHERE target IN (?, ?)`, passing `D` and `C`. Not a stored table; cheap with the index on `target`.
-
-Resolving a reference target: if the string contains `/` it's a DOI; look it up in `records.doi`, then fall back to `stubs.doi`. Otherwise it's a citekey; look it up in `records.citekey`, then fall back to `stubs.citekey`.
+Incoming citations join `citation_edges.target_work_id` to `library_works.work_id`; they are not stored separately. Alias resolution happens through `(kind, normalized_value)` in `work_aliases`.
 
 ## CLI surface
 
@@ -251,7 +258,11 @@ glean reconcile-attachments [--dry-run]
 glean tui                                     # launch Textual TUI
 
 glean graph fetch <citekey>                   # populate references: via OpenAlex
-glean graph fetch --all [--since DATE]        # batch fill
+glean graph fetch --all [--since DATE]        # deprecated compatibility alias
+glean graph status                            # coverage and queue state
+glean graph backfill --dry-run [--limit N]    # inspect or queue historical work
+glean graph pause | resume                    # persistent worker control
+glean graph retry <citekey>                    # high-priority retry
 glean graph out <citekey>                     # list outgoing, resolve stubs
 glean graph in  <citekey>                     # list incoming
 glean graph viz <citekey> [--depth N]         # pyvis HTML
@@ -310,7 +321,7 @@ from glean.graph.queries import (
 )
 ```
 
-`openalex_fetch(doi)` returns a normalized dict of metadata plus a list of outgoing reference DOIs. Crossref is the fallback when OpenAlex has no record or no references for the DOI. Both cache raw JSON under `~/Library/Caches/glean/<source>/<doi>.json` with a 30-day TTL.
+`openalex_fetch(doi)` returns source metadata, stable outgoing reference identities, and batched target metadata. Target works are resolved with OpenAlex OR filters in groups of 50; DOI-less OpenAlex identities are preserved. Crossref is the fallback when OpenAlex has no record or no usable references. Both cache raw JSON under `~/Library/Caches/glean/<source>/<doi>.json` with a 30-day TTL.
 
 `incoming_for(citekey)` and `outgoing_for(citekey)` return a mix of `Record` (in library) and `Stub` (not in library) objects. Stubs carry whatever metadata the source gave us, usually title and year.
 
@@ -318,7 +329,7 @@ from glean.graph.queries import (
 
 `shortest_path(a, b)` uses networkx over the outgoing edges. Optional, cheap, useful for visualizations.
 
-Reference population is lazy: `glean add` does not fetch references by default. The user (or paper_intake, later) calls `glean graph fetch` when the graph matters. This keeps citation-graph network failures out of the critical path. PDF acquisition is different: `glean add` tries to fetch and attach an available PDF immediately, but treats failure as a backlog item rather than an add failure.
+Reference population is automatic but remains outside ingestion's network-critical path. `glean add` commits the record, enqueues a high-priority graph job, and returns without waiting for graph providers; duplicate adds self-heal missing graph state the same way. The persistent home `glean web` service owns a single worker that reconciles DOI-bearing records arriving through iCloud, applies the five-step retry schedule, pauses after repeated provider failures, and writes graph fields under a cross-process mutation lock. DOI-less records remain queryable through manual references and report automatic lookup as unsupported. Complete/empty graphs are not refreshed automatically in this rollout.
 
 ## Integration contract
 

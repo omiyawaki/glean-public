@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from glean.schema import Attachment, Author, Record
+from glean.schema import (
+    Attachment,
+    Author,
+    Record,
+    ReferenceGraphState,
+    ReferenceID,
+)
 from glean.store import Library, attachment_filename, dumps, loads, normalize_tag
 
 
@@ -20,8 +26,8 @@ def test_load_journal_article(lib: Library):
     assert len(r.attachments) == 2
     assert r.main_attachment().kind == "main"
     assert r.references == [
-        "10.1175/JAS-D-22-0011.1",
-        "Sellers1965PhysicalClimatology",
+        ReferenceID("doi", "10.1175/JAS-D-22-0011.1"),
+        ReferenceID("citekey", "Sellers1965PhysicalClimatology"),
     ]
     assert "paragraphs" in r.abstract
     assert "Figure 3" in r.notes
@@ -67,6 +73,54 @@ def test_round_trip_is_idempotent_in_memory(lib: Library):
     r2 = loads(text1)
     text2 = dumps(r2)
     assert text1 == text2
+
+
+def test_legacy_references_migrate_to_typed_scalars_on_write(lib: Library):
+    record = lib.load("Miyawaki2024Attention")
+
+    text = dumps(record)
+
+    assert "- doi:10.1175/JAS-D-22-0011.1" in text
+    assert "- citekey:Sellers1965PhysicalClimatology" in text
+
+
+def test_typed_openalex_and_graph_state_round_trip(lib: Library):
+    record = lib.load("Miyawaki2024Attention")
+    record.references.append(ReferenceID("openalex", "W123456789"))
+    record.reference_graph = ReferenceGraphState(
+        status="complete",
+        providers=["openalex"],
+        fetched_at=date(2026, 8, 9),
+    )
+
+    text = dumps(record)
+    loaded = loads(text)
+
+    assert "- openalex:W123456789" in text
+    assert "reference_graph:" in text
+    assert loaded.reference_graph == record.reference_graph
+    assert loaded.source == "openalex"
+    assert loaded.source_fetched_at == date(2026, 4, 19)
+
+
+def test_stale_non_graph_save_preserves_newer_enrichment(lib: Library):
+    stale = lib.load("Miyawaki2024Attention")
+    enriched = lib.load("Miyawaki2024Attention")
+    enriched.references = [ReferenceID("openalex", "W900")]
+    enriched.reference_graph = ReferenceGraphState(
+        status="complete",
+        providers=["openalex"],
+        fetched_at=date(2026, 8, 9),
+    )
+    lib.save(enriched, today=date(2026, 8, 9))
+
+    stale.notes = "an unrelated edit made from a stale read"
+    lib.save(stale, today=date(2026, 8, 9))
+
+    stored = lib.load("Miyawaki2024Attention")
+    assert stored.notes == "an unrelated edit made from a stale read"
+    assert stored.references == [ReferenceID("openalex", "W900")]
+    assert stored.reference_graph == enriched.reference_graph
 
 
 def test_tags_round_trip_in_yaml(lib: Library):

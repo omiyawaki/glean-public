@@ -27,7 +27,8 @@ from glean.citekey import is_valid as citekey_is_valid
 from glean.index import Index
 from glean.schema import (
     ATTACHMENT_KIND_ENUM, Attachment, Author, Record,
-    TYPE_ENUM, ValidationError, normalize_tag, validate,
+    ReferenceGraphState, ReferenceID, TYPE_ENUM, ValidationError,
+    normalize_tag, validate,
 )
 from glean.store import Library, attachment_filename
 
@@ -182,16 +183,22 @@ def cmd_rename(args: argparse.Namespace) -> int:
     cited_by = [row[0] for row in conn.execute(
         "SELECT citekey FROM outgoing WHERE target = ?", (old,)
     )]
-    # Load + rewrite the renamed record.
-    r = lib.load(old)
-    r.citekey = new
-    lib.save(r)
-    lib.delete(old)
-    # Rewrite back-refs.
-    for ck in cited_by:
-        other = lib.load(ck)
-        other.references = [new if t == old else t for t in other.references]
-        lib.save(other)
+    with lib.mutation_lock():
+        # Load + rewrite the renamed record.
+        r = lib.load(old)
+        r.citekey = new
+        lib._save_unlocked(r)
+        lib.path_for(old).unlink()
+        # Rewrite back-refs.
+        for ck in cited_by:
+            other = lib.load(ck)
+            other.references = [
+                ReferenceID("citekey", new)
+                if reference.kind == "citekey" and reference.value == old
+                else reference
+                for reference in other.references
+            ]
+            lib._save_unlocked(other)
     # Refresh index.
     idx.refresh()
     print(f"renamed {old} -> {new}  (rewrote refs in {len(cited_by)} records)")
@@ -300,7 +307,15 @@ def _export_json(records: Iterable[Record]) -> str:
             "added_at": r.added_at.isoformat() if r.added_at else None,
             "modified_at": r.modified_at.isoformat() if r.modified_at else None,
             "read": r.read, "notes": r.notes,
-            "references": r.references,
+            "references": [reference.legacy_value for reference in r.references],
+            "reference_graph": (
+                {
+                    "status": r.reference_graph.status,
+                    "providers": r.reference_graph.providers,
+                    "fetched_at": r.reference_graph.fetched_at.isoformat(),
+                }
+                if r.reference_graph else None
+            ),
         })
     return json.dumps(out, ensure_ascii=False, indent=2)
 
@@ -453,6 +468,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     ).fetchone()
     if existing:
         if lib.exists(existing[0]):
+            if lib.load(existing[0]).reference_graph is None:
+                idx.enqueue_graph_job(existing[0], priority=100)
             print(existing[0])
             return 4
         # The index points at a citekey whose YAML is missing on disk. Refresh
@@ -533,6 +550,7 @@ def cmd_add(args: argparse.Namespace) -> int:
 
     lib.save(record)
     idx._upsert(record)
+    idx.enqueue_graph_job(citekey, priority=100)
     _try_fetch_pdf_for_record(lib, idx, record, doi, quiet=args.quiet)
     print(citekey)
     return 0
@@ -990,22 +1008,23 @@ def cmd_graph_suggest(args: argparse.Namespace) -> int:
 def _do_graph_fetch_one(citekey: str, lib: Library, idx: Index) -> int:
     """Populate references: for a single record. 0=ok, 5=network, 1=not found, 6=no DOI."""
     from glean.graph import openalex, crossref
+    from glean.graph.worker import GraphWorker
     if not lib.exists(citekey):
         return 1
     r = lib.load(citekey)
     if not r.doi:
         return 6
-    result = openalex.fetch(r.doi)
-    if result is None or not result.get("references"):
-        result = crossref.fetch(r.doi)
-    if result is None:
+    worker = GraphWorker(
+        lib,
+        idx,
+        fetch_openalex=openalex.fetch,
+        fetch_crossref=crossref.fetch,
+    )
+    try:
+        worker.enrich(citekey)
+    except Exception:
         return 5
-    refs = result.get("references") or []
-    r.references = list(dict.fromkeys(refs))  # de-dup preserving order
-    r.source = "openalex" if openalex.fetch.__module__ else r.source or "openalex"
-    r.source_fetched_at = date.today()
-    lib.save(r)
-    idx._upsert(r)
+    idx.finish_graph_job(citekey)
     return 0
 
 
@@ -1014,6 +1033,10 @@ def cmd_graph_fetch(args: argparse.Namespace) -> int:
     idx = _index(lib)
     idx.connect()
     if args.all:
+        _err(
+            "warning: graph fetch --all is deprecated; use "
+            "glean graph backfill and the background worker"
+        )
         cutoff = None
         if args.since:
             cutoff = date.fromisoformat(args.since)
@@ -1021,7 +1044,11 @@ def cmd_graph_fetch(args: argparse.Namespace) -> int:
         for r in lib.iter_records():
             if not r.doi:
                 continue
-            if cutoff and r.source_fetched_at and r.source_fetched_at >= cutoff:
+            if (
+                cutoff
+                and r.reference_graph
+                and r.reference_graph.fetched_at >= cutoff
+            ):
                 continue  # already fetched recently
             rc = _do_graph_fetch_one(r.citekey, lib, idx)
             if rc == 0:
@@ -1042,6 +1069,63 @@ def cmd_graph_fetch(args: argparse.Namespace) -> int:
         elif rc == 6:
             _err(f"{args.citekey} has no DOI; cannot fetch")
         return rc
+
+
+def cmd_graph_status(args: argparse.Namespace) -> int:
+    lib = _library()
+    idx = _ensure_indexed(lib)
+    idx.reconcile_graph_jobs()
+    print(json.dumps(idx.graph_status(), indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_graph_backfill(args: argparse.Namespace) -> int:
+    lib = _library()
+    idx = _ensure_indexed(lib)
+    query = (
+        "SELECT citekey FROM records WHERE doi IS NOT NULL "
+        "AND reference_status IS NULL ORDER BY added_at DESC, citekey"
+    )
+    params: tuple[object, ...] = ()
+    if args.limit is not None:
+        query += " LIMIT ?"
+        params = (args.limit,)
+    citekeys = [row[0] for row in idx.connect().execute(query, params)]
+    if args.dry_run:
+        print(f"would queue {len(citekeys)} paper(s)")
+        return 0
+    for citekey in citekeys:
+        idx.enqueue_graph_job(citekey, priority=10)
+    print(f"queued {len(citekeys)} paper(s)")
+    return 0
+
+
+def cmd_graph_pause(args: argparse.Namespace) -> int:
+    idx = _ensure_indexed(_library())
+    idx.set_graph_paused(True)
+    print("citation graph worker paused")
+    return 0
+
+
+def cmd_graph_resume(args: argparse.Namespace) -> int:
+    idx = _ensure_indexed(_library())
+    idx.set_graph_paused(False)
+    idx.reconcile_graph_jobs()
+    print("citation graph worker resumed")
+    return 0
+
+
+def cmd_graph_retry(args: argparse.Namespace) -> int:
+    lib = _library()
+    idx = _ensure_indexed(lib)
+    if not lib.exists(args.citekey):
+        _err(f"not found: {args.citekey}")
+        return 1
+    if not idx.enqueue_graph_job(args.citekey, priority=100):
+        _err(f"{args.citekey} has no DOI; cannot fetch")
+        return 6
+    print(f"queued {args.citekey}")
+    return 0
 
 
 def cmd_graph_viz(args: argparse.Namespace) -> int:
@@ -1214,6 +1298,24 @@ def _build_parser() -> argparse.ArgumentParser:
     gfetch.add_argument("--all", action="store_true")
     gfetch.add_argument("--since", help="skip records fetched on or after this ISO date")
     gfetch.set_defaults(func=cmd_graph_fetch)
+
+    gstatus = gpsub.add_parser("status", help="show citation enrichment coverage")
+    gstatus.set_defaults(func=cmd_graph_status)
+
+    gbackfill = gpsub.add_parser("backfill", help="queue missing citation graphs")
+    gbackfill.add_argument("--dry-run", action="store_true")
+    gbackfill.add_argument("--limit", type=int)
+    gbackfill.set_defaults(func=cmd_graph_backfill)
+
+    gpause = gpsub.add_parser("pause", help="pause automatic citation enrichment")
+    gpause.set_defaults(func=cmd_graph_pause)
+
+    gresume = gpsub.add_parser("resume", help="resume automatic citation enrichment")
+    gresume.set_defaults(func=cmd_graph_resume)
+
+    gretry = gpsub.add_parser("retry", help="queue one paper for citation enrichment")
+    gretry.add_argument("citekey")
+    gretry.set_defaults(func=cmd_graph_retry)
 
     gviz = gpsub.add_parser("viz", help="export a pyvis HTML graph")
     gviz.add_argument("citekey")

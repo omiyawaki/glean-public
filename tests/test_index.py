@@ -1,9 +1,10 @@
 from datetime import date
 from pathlib import Path
+import sqlite3
 
 import pytest
 
-from glean.index import Index
+from glean.index import SCHEMA_VERSION, Index
 from glean.schema import Author, Record
 from glean.store import Library
 
@@ -13,6 +14,30 @@ def test_rebuild_populates_records(index: Index, lib: Library):
     conn = index.connect()
     n = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
     assert n == 5
+
+
+def test_index_uses_versioned_schema(index: Index):
+    assert index.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    tables = {
+        row[0]
+        for row in index.connect().execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+        )
+    }
+    assert {
+        "works", "work_aliases", "library_works", "citation_edges", "graph_jobs",
+        "outgoing", "stubs",
+    } <= tables
+    object_types = dict(
+        index.connect().execute(
+            "SELECT name, type FROM sqlite_master WHERE name IN ('outgoing', 'stubs')"
+        )
+    )
+    assert object_types == {"outgoing": "view", "stubs": "view"}
+    with pytest.raises(sqlite3.OperationalError):
+        index.connect().execute(
+            "INSERT INTO outgoing(citekey, target) VALUES ('A', 'B')"
+        )
 
 
 def test_rebuild_populates_authors(index: Index):
@@ -98,6 +123,49 @@ def test_outgoing_resolves_doi_and_citekey(index: Index):
     out = index.outgoing("Miyawaki2024Attention")
     assert ("10.1175/JAS-D-22-0011.1", None) in out        # DOI, not in library -> stub
     assert ("Sellers1965PhysicalClimatology", None) in out  # citekey, also a stub
+
+
+def test_external_aliases_merge_without_changing_reference_order(index: Index):
+    index.rebuild()
+    before = [entry["target_id"] for entry in index.reference_entries("Wills2023Citation")]
+
+    index.upsert_work_metadata(
+        {
+            "doi": "10.1038/s41586-020-12345-6",
+            "openalex_id": "W987654321",
+            "title": "External cached title",
+            "authors": [{"family": "External", "given": "E."}],
+            "year": 2020,
+        },
+        source="openalex",
+        fetched_at="2026-08-09",
+    )
+
+    entries = index.reference_entries("Wills2023Citation")
+    assert [entry["target_id"] for entry in entries] == before
+    external = entries[-1]
+    assert external["openalex_id"] == "W987654321"
+    assert external["title"] == "External cached title"
+
+
+def test_record_rewrite_preserves_graph_retry_state(index: Index, lib: Library):
+    from datetime import datetime, timezone
+
+    index.rebuild()
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    index.enqueue_graph_job("Miyawaki2024Attention", now=now)
+    assert index.claim_graph_job(now=now) == "Miyawaki2024Attention"
+    index.fail_graph_job("Miyawaki2024Attention", "offline", now=now)
+
+    record = lib.load("Miyawaki2024Attention")
+    record.notes = "unrelated edit"
+    lib.save(record, today=date(2026, 8, 9))
+    index._upsert(record)
+
+    job = index.graph_job("Miyawaki2024Attention")
+    assert job is not None
+    assert job["state"] == "retry_wait"
+    assert job["attempts"] == 1
 
 
 def test_stubs_populated_for_unresolved_targets(index: Index):

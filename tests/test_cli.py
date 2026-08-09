@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from glean.cli import main
+from glean.schema import ReferenceGraphState, ReferenceID
 from glean.store import Library
 
 
@@ -117,6 +118,35 @@ def test_export_json_includes_tags(cli_env, capsys):
     assert data[0]["tags"] == ["proj-a", "upper-troposphere"]
 
 
+def test_export_json_preserves_legacy_reference_values_and_adds_graph_state(
+    cli_env,
+    capsys,
+):
+    from datetime import date
+
+    record = cli_env.load("Miyawaki2024Attention")
+    record.references.append(ReferenceID("openalex", "W123"))
+    record.reference_graph = ReferenceGraphState(
+        status="complete",
+        providers=["openalex"],
+        fetched_at=date(2026, 8, 9),
+    )
+    cli_env.save(record)
+
+    assert main(["export", "--format", "json", record.citekey]) == 0
+    data = json.loads(capsys.readouterr().out)[0]
+    assert data["references"] == [
+        "10.1175/JAS-D-22-0011.1",
+        "Sellers1965PhysicalClimatology",
+        "openalex:W123",
+    ]
+    assert data["reference_graph"] == {
+        "status": "complete",
+        "providers": ["openalex"],
+        "fetched_at": "2026-08-09",
+    }
+
+
 def test_export_bibtex(cli_env, capsys):
     rc = main(["export", "--format", "bibtex", "Arakawa1974Schubert"])
     assert rc == 0
@@ -215,6 +245,11 @@ def test_add_duplicate_returns_4(cli_env, monkeypatch, capsys):
     out = capsys.readouterr().out.strip()
     assert rc == 4
     assert out == "Miyawaki2024Attention"
+    db = sqlite3.connect(os.environ["GLEAN_INDEX"])
+    assert db.execute(
+        "SELECT state FROM graph_jobs WHERE citekey = ?",
+        ("Miyawaki2024Attention",),
+    ).fetchone() == ("queued",)
 
 
 def test_add_duplicate_detects_doi_case_mismatch(cli_env, monkeypatch, capsys):
@@ -278,6 +313,11 @@ def test_add_success(cli_env, monkeypatch, capsys):
     assert r.doi == "10.1234/new-record"
     assert r.journal == "Nature"
     assert r.type == "journal-article"
+    db = sqlite3.connect(os.environ["GLEAN_INDEX"])
+    assert db.execute(
+        "SELECT state, priority FROM graph_jobs WHERE citekey = ?",
+        ("Smith2026Brand",),
+    ).fetchone() == ("queued", 100)
 
 
 def test_add_success_fetches_and_attaches_pdf(cli_env, monkeypatch, capsys):
@@ -733,6 +773,28 @@ def test_graph_suggest(cli_env, capsys):
     assert "10.1175/JAS-D-22-0011.1" in out
 
 
+def test_graph_backfill_status_pause_resume_and_retry(cli_env, capsys):
+    assert main(["reindex", "--force"]) == 0
+    capsys.readouterr()
+
+    assert main(["graph", "backfill", "--dry-run", "--limit", "2"]) == 0
+    assert "would queue 2 paper(s)" in capsys.readouterr().out
+    assert main(["graph", "pause"]) == 0
+    capsys.readouterr()
+    assert main(["graph", "status"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["paused"] is True
+    assert status["eligible"] == 4
+    assert main(["graph", "retry", "Miyawaki2024Attention"]) == 0
+    assert main(["graph", "resume"]) == 0
+    assert "resumed" in capsys.readouterr().out
+
+
+def test_graph_retry_rejects_doi_less_record(cli_env):
+    assert main(["reindex", "--force"]) == 0
+    assert main(["graph", "retry", "Vallis2019AOFD"]) == 6
+
+
 def test_graph_fetch_no_doi_returns_6(cli_env):
     main(["reindex", "--force"])
     rc = main(["graph", "fetch", "Vallis2019AOFD"])
@@ -909,7 +971,10 @@ def test_graph_fetch_populates_refs(cli_env, monkeypatch):
     rc = main(["graph", "fetch", "Arakawa1974Schubert"])
     assert rc == 0
     r = cli_env.load("Arakawa1974Schubert")
-    assert r.references == ["10.1111/xx", "10.2222/yy"]
+    assert [reference.legacy_value for reference in r.references] == [
+        "10.1111/xx",
+        "10.2222/yy",
+    ]
 
 
 def test_oneline_collapses_whitespace():
