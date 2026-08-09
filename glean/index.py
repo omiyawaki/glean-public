@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS records (
     yaml_modified   TEXT NOT NULL,
     title           TEXT NOT NULL,
     year            INTEGER,
+    published_at    TEXT,
     type            TEXT,
     doi             TEXT,
     arxiv           TEXT,
@@ -153,6 +154,24 @@ CREATE TABLE IF NOT EXISTS graph_settings (
     value  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS publication_jobs (
+    citekey          TEXT PRIMARY KEY,
+    state            TEXT NOT NULL,
+    priority         INTEGER NOT NULL DEFAULT 10,
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at  TEXT,
+    last_error       TEXT,
+    updated_at       TEXT NOT NULL,
+    FOREIGN KEY (citekey) REFERENCES records(citekey) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_publication_jobs_ready
+    ON publication_jobs(state, next_attempt_at, priority DESC, updated_at);
+
+CREATE TABLE IF NOT EXISTS publication_settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     citekey UNINDEXED,
     title,
@@ -163,7 +182,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
 );
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 GRAPH_RETRY_DELAYS_SECONDS = (300, 1_800, 7_200, 43_200, 86_400)
 
 
@@ -203,6 +222,7 @@ class Index:
         previous_version = conn.execute("PRAGMA user_version").fetchone()[0]
         columns = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
         additions = {
+            "published_at": "TEXT",
             "reference_status": "TEXT",
             "reference_providers": "TEXT",
             "reference_fetched_at": "TEXT",
@@ -272,7 +292,7 @@ class Index:
             "SELECT COUNT(*) FROM library_works"
         ).fetchone()[0]
         return (
-            previous_version < SCHEMA_VERSION
+            previous_version < 2
             or (record_count > 0 and library_work_count == 0)
         )
 
@@ -371,21 +391,27 @@ class Index:
                 "FROM graph_jobs WHERE citekey = ?",
                 (record.citekey,),
             ).fetchone()
+            preserved_publication_job = conn.execute(
+                "SELECT state, priority, attempts, next_attempt_at, last_error, updated_at "
+                "FROM publication_jobs WHERE citekey = ?",
+                (record.citekey,),
+            ).fetchone()
             # Remove any prior state, then re-insert.
             conn.execute("DELETE FROM records WHERE citekey = ?", (record.citekey,))
             conn.execute("DELETE FROM fts WHERE citekey = ?", (record.citekey,))
 
             conn.execute(
-                "INSERT INTO records(citekey, yaml_path, yaml_modified, title, year, "
+                "INSERT INTO records(citekey, yaml_path, yaml_modified, title, year, published_at, "
                 "type, doi, arxiv, isbn, pmid, pmcid, legacy_citekey, added_at, read, "
                 "reference_status, reference_providers, reference_fetched_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.citekey,
                     str(self.library.path_for(record.citekey)),
                     record.modified_at.isoformat() if record.modified_at else "",
                     record.title,
                     record.year,
+                    record.published_at.isoformat() if record.published_at else None,
                     record.type,
                     record.doi,
                     record.arxiv,
@@ -461,6 +487,13 @@ class Index:
                     "(citekey, state, priority, attempts, next_attempt_at, last_error, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (record.citekey, *preserved_job),
+                )
+            if preserved_publication_job is not None and record.published_at is None:
+                conn.execute(
+                    "INSERT INTO publication_jobs"
+                    "(citekey, state, priority, attempts, next_attempt_at, last_error, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (record.citekey, *preserved_publication_job),
                 )
 
     def _alias_work_id(self, conn: sqlite3.Connection, reference: ReferenceID) -> Optional[int]:
@@ -1125,5 +1158,211 @@ class Index:
     def graph_is_paused(self) -> bool:
         row = self.connect().execute(
             "SELECT value FROM graph_settings WHERE key = 'paused'"
+        ).fetchone()
+        return bool(row and row[0] == "1")
+
+    def reconcile_publication_jobs(self, *, now: Optional[datetime] = None) -> int:
+        now = now or datetime.now(timezone.utc)
+        timestamp = now.isoformat()
+        conn = self.connect()
+        with conn:
+            conn.execute(
+                "DELETE FROM publication_jobs WHERE citekey IN "
+                "(SELECT citekey FROM records WHERE published_at IS NOT NULL)"
+            )
+            conn.execute(
+                "UPDATE publication_jobs SET state = 'queued', attempts = 0, "
+                "next_attempt_at = NULL, last_error = NULL, updated_at = ? "
+                "WHERE state = 'running' AND updated_at < ?",
+                (timestamp, (now - timedelta(minutes=20)).isoformat()),
+            )
+            conn.execute(
+                "UPDATE publication_jobs SET state = 'queued', attempts = 0, "
+                "next_attempt_at = NULL, last_error = NULL, updated_at = ? "
+                "WHERE state = 'failed' AND updated_at < ?",
+                (timestamp, (now - timedelta(days=7)).isoformat()),
+            )
+            before = conn.total_changes
+            conn.execute(
+                "INSERT OR IGNORE INTO publication_jobs"
+                "(citekey, state, priority, attempts, updated_at) "
+                "SELECT citekey, 'queued', 10, 0, ? FROM records "
+                "WHERE doi IS NOT NULL AND published_at IS NULL",
+                (timestamp,),
+            )
+            return conn.total_changes - before
+
+    def enqueue_publication_job(
+        self,
+        citekey: str,
+        *,
+        priority: int = 100,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        now = now or datetime.now(timezone.utc)
+        conn = self.connect()
+        row = conn.execute(
+            "SELECT doi, published_at FROM records WHERE citekey = ?",
+            (citekey,),
+        ).fetchone()
+        if row is None or not row[0] or row[1]:
+            return False
+        with conn:
+            conn.execute(
+                "INSERT INTO publication_jobs"
+                "(citekey, state, priority, attempts, next_attempt_at, last_error, updated_at) "
+                "VALUES (?, 'queued', ?, 0, NULL, NULL, ?) "
+                "ON CONFLICT(citekey) DO UPDATE SET "
+                "state = 'queued', priority = MAX(priority, excluded.priority), "
+                "attempts = 0, next_attempt_at = NULL, last_error = NULL, "
+                "updated_at = excluded.updated_at",
+                (citekey, priority, now.isoformat()),
+            )
+        return True
+
+    def claim_publication_job(
+        self,
+        *,
+        now: Optional[datetime] = None,
+    ) -> Optional[str]:
+        now = now or datetime.now(timezone.utc)
+        conn = self.connect()
+        with conn:
+            row = conn.execute(
+                "SELECT j.citekey FROM publication_jobs j "
+                "JOIN records r ON r.citekey = j.citekey "
+                "WHERE j.state = 'queued' "
+                "OR (j.state = 'retry_wait' AND j.next_attempt_at <= ?) "
+                "ORDER BY j.priority DESC, r.year DESC, r.added_at DESC, "
+                "j.updated_at ASC LIMIT 1",
+                (now.isoformat(),),
+            ).fetchone()
+            if row is None:
+                return None
+            citekey = row[0]
+            conn.execute(
+                "UPDATE publication_jobs SET state = 'running', updated_at = ? "
+                "WHERE citekey = ?",
+                (now.isoformat(), citekey),
+            )
+            return citekey
+
+    def finish_publication_job(
+        self,
+        citekey: str,
+        *,
+        found: bool,
+        now: Optional[datetime] = None,
+    ) -> None:
+        conn = self.connect()
+        with conn:
+            if found:
+                conn.execute(
+                    "DELETE FROM publication_jobs WHERE citekey = ?",
+                    (citekey,),
+                )
+            else:
+                timestamp = (now or datetime.now(timezone.utc)).isoformat()
+                conn.execute(
+                    "UPDATE publication_jobs SET state = 'empty', attempts = 0, "
+                    "next_attempt_at = NULL, last_error = NULL, updated_at = ? "
+                    "WHERE citekey = ?",
+                    (timestamp, citekey),
+                )
+
+    def fail_publication_job(
+        self,
+        citekey: str,
+        error: str,
+        *,
+        now: Optional[datetime] = None,
+    ) -> str:
+        now = now or datetime.now(timezone.utc)
+        conn = self.connect()
+        row = conn.execute(
+            "SELECT attempts FROM publication_jobs WHERE citekey = ?",
+            (citekey,),
+        ).fetchone()
+        attempts = (row[0] if row else 0) + 1
+        if attempts <= len(GRAPH_RETRY_DELAYS_SECONDS):
+            state = "retry_wait"
+            next_attempt = now + timedelta(
+                seconds=GRAPH_RETRY_DELAYS_SECONDS[attempts - 1]
+            )
+        else:
+            state = "failed"
+            next_attempt = None
+        with conn:
+            conn.execute(
+                "UPDATE publication_jobs SET state = ?, attempts = ?, "
+                "next_attempt_at = ?, last_error = ?, updated_at = ? "
+                "WHERE citekey = ?",
+                (
+                    state,
+                    attempts,
+                    next_attempt.isoformat() if next_attempt else None,
+                    error[:2_000],
+                    now.isoformat(),
+                    citekey,
+                ),
+            )
+        return state
+
+    def publication_job(self, citekey: str) -> Optional[dict]:
+        row = self.connect().execute(
+            "SELECT state, attempts, next_attempt_at, last_error, updated_at "
+            "FROM publication_jobs WHERE citekey = ?",
+            (citekey,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "state": row[0],
+            "attempts": row[1],
+            "next_attempt_at": row[2],
+            "last_error": row[3],
+            "updated_at": row[4],
+        }
+
+    def publication_status(self) -> dict:
+        conn = self.connect()
+        total, eligible, complete = conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN doi IS NOT NULL THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN doi IS NOT NULL AND published_at IS NOT NULL "
+            "THEN 1 ELSE 0 END) "
+            "FROM records"
+        ).fetchone()
+        jobs = {
+            state: count
+            for state, count in conn.execute(
+                "SELECT state, COUNT(*) FROM publication_jobs GROUP BY state"
+            )
+        }
+        return {
+            "total": total or 0,
+            "eligible": eligible or 0,
+            "complete": complete or 0,
+            "empty": jobs.get("empty", 0),
+            "unsupported": (total or 0) - (eligible or 0),
+            "queued": jobs.get("queued", 0),
+            "running": jobs.get("running", 0),
+            "retrying": jobs.get("retry_wait", 0),
+            "failed": jobs.get("failed", 0),
+            "paused": self.publication_is_paused(),
+        }
+
+    def set_publication_paused(self, paused: bool) -> None:
+        conn = self.connect()
+        with conn:
+            conn.execute(
+                "INSERT INTO publication_settings(key, value) VALUES ('paused', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("1" if paused else "0",),
+            )
+
+    def publication_is_paused(self) -> bool:
+        row = self.connect().execute(
+            "SELECT value FROM publication_settings WHERE key = 'paused'"
         ).fetchone()
         return bool(row and row[0] == "1")

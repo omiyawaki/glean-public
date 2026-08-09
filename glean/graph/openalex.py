@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import date
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlencode
@@ -176,14 +177,32 @@ def _normalize_metadata(w: dict) -> dict:
                 authors.append({"family": parts[1], "given": parts[0]})
             else:
                 authors.append({"family": name, "given": None})
+    published_at = w.get("publication_date")
+    if published_at:
+        try:
+            published_at = date.fromisoformat(str(published_at)).isoformat()
+        except ValueError:
+            published_at = None
     return {
         "openalex_id": str(w.get("id") or "").rsplit("/", 1)[-1] or None,
         "doi": w.get("doi") and w["doi"].replace("https://doi.org/", ""),
         "title": w.get("display_name") or w.get("title") or "",
         "authors": authors,
         "year": w.get("publication_year"),
+        "published_at": published_at,
         "type": w.get("type"),
     }
+
+
+def fetch_source_metadata(
+    doi: str,
+    *,
+    http_get: Callable[[str], Optional[dict]] = _default_http_get,
+    ttl_days: int = DEFAULT_TTL_DAYS,
+) -> Optional[dict]:
+    """Fetch normalized source metadata without hydrating its references."""
+    work = _fetch_work_by_doi(doi, http_get=http_get, ttl_days=ttl_days)
+    return _normalize_metadata(work) if work is not None else None
 
 
 def fetch(doi: str, *, http_get: Callable[[str], Optional[dict]] = _default_http_get,

@@ -25,6 +25,7 @@ from pathlib import Path
 
 from glean.index import Index
 from glean.graph.worker import GraphWorker
+from glean.publication import PublicationWorker
 from glean.store import Library
 
 
@@ -44,8 +45,9 @@ def _list_entries(idx: Index) -> list[dict]:
     """All records for the library browse view, joined with authors."""
     conn = idx.connect()
     rows = conn.execute(
-        "SELECT citekey, title, year, doi, added_at FROM records "
-        "ORDER BY year DESC NULLS LAST, added_at DESC NULLS LAST, citekey ASC"
+        "SELECT citekey, title, year, published_at, doi, added_at FROM records "
+        "ORDER BY year DESC NULLS LAST, published_at DESC NULLS LAST, "
+        "added_at DESC NULLS LAST, citekey ASC"
     ).fetchall()
     by_ck: dict[str, list[dict]] = {}
     for ck, family, given in conn.execute(
@@ -53,11 +55,12 @@ def _list_entries(idx: Index) -> list[dict]:
     ):
         by_ck.setdefault(ck, []).append({"family": family, "given": given or ""})
     entries = []
-    for ck, title, year, doi, added_at in rows:
+    for ck, title, year, published_at, doi, added_at in rows:
         entries.append({
             "citekey": ck,
             "title": title,
             "year": year,
+            "published_at": published_at,
             "doi": doi,
             "added_at": added_at,
             "authors": by_ck.get(ck, []),
@@ -193,6 +196,9 @@ def _record_detail(lib: Library, citekey: str) -> dict | None:
         "type": record.type,
         "title": record.title,
         "year": record.year,
+        "published_at": (
+            record.published_at.isoformat() if record.published_at else None
+        ),
         "doi": record.doi,
         "arxiv": record.arxiv,
         "isbn": record.isbn,
@@ -336,15 +342,31 @@ def _start_graph_worker(lib: Library, db_path: Path) -> None:
     threading.Thread(target=loop, daemon=True, name="glean-graph-worker").start()
 
 
+def _start_publication_worker(lib: Library, db_path: Path) -> None:
+    """Run one durable publication-date worker owned by the home service."""
+    def loop() -> None:
+        worker_index = Index(lib, db_path)
+        worker = PublicationWorker(lib, worker_index)
+        worker.run_forever()
+
+    threading.Thread(
+        target=loop,
+        daemon=True,
+        name="glean-publication-worker",
+    ).start()
+
+
 def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
     lib = Library(Path.home() / "Documents" / "glean")
     db_path = Path.home() / "Library" / "Caches" / "glean" / "index.sqlite"
     idx = Index(lib, db_path)
     _refresh_index(idx, phase="startup")
     idx.reconcile_graph_jobs()
+    idx.reconcile_publication_jobs()
     snapshot = PapersSnapshot.from_index(idx)
     _start_refresh_thread(idx, snapshot)
     _start_graph_worker(lib, db_path)
+    _start_publication_worker(lib, db_path)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def _json(self, status: int, body: dict | list) -> None:
@@ -376,6 +398,8 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
                 )
             if parsed.path == "/api/graph/status":
                 return self._json(200, idx.graph_status())
+            if parsed.path == "/api/publication-dates/status":
+                return self._json(200, idx.publication_status())
             if parsed.path.startswith("/api/papers/"):
                 suffix = parsed.path[len("/api/papers/"):]
                 if suffix.endswith("/references"):

@@ -165,6 +165,7 @@ class Record:
     title: str
     authors: list[Author]
     year: int
+    published_at: Optional[date] = None
     added_at: Optional[date] = None
     modified_at: Optional[date] = None
     doi: Optional[str] = None
@@ -213,6 +214,11 @@ def validate(record: Record) -> None:
             raise ValidationError("author family is required")
     if not isinstance(record.year, int):
         raise ValidationError(f"year must be an int, got {type(record.year).__name__}")
+    if record.published_at is not None and not isinstance(record.published_at, date):
+        raise ValidationError(
+            "published_at must be a date, got "
+            f"{type(record.published_at).__name__}"
+        )
     seen_tags: set[str] = set()
     for tag in record.tags:
         normalized = normalize_tag(tag)

@@ -53,6 +53,7 @@ def test_worker_commits_typed_graph_and_preserves_concurrent_fields(tmp_path: Pa
                 "title": "Provider title must not replace library metadata",
                 "authors": [],
                 "year": 2026,
+                "published_at": "2026-05-03",
             },
             "references": ["10.5678/target", "openalex:W200"],
             "works": [
@@ -78,6 +79,7 @@ def test_worker_commits_typed_graph_and_preserves_concurrent_fields(tmp_path: Pa
     assert worker.run_once() is True
     stored = library.load("Example2026Paper")
     assert stored.notes == "edited while the network request was running"
+    assert stored.published_at == date(2026, 5, 3)
     assert [reference.serialized for reference in stored.references] == [
         "doi:10.5678/target",
         "openalex:W200",

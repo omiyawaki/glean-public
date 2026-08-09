@@ -20,6 +20,7 @@ authors:                            # required, ordered
   - family: Vallis
     given: Geoffrey
 year: 2024                          # required, int
+published_at: 2024-03-15            # optional exact publication date, ISO date
 doi: 10.1175/JCLI-D-23-0456.1       # optional but strongly preferred
 arxiv: "2401.12345"                 # optional, string (preserves leading zeros)
 isbn: "9781009157896"               # optional, for books and chapters
@@ -60,7 +61,7 @@ source_fetched_at: 2026-04-18       # graph enrichment never overwrites these
 
 Enum for `type`: `journal-article`, `preprint`, `book`, `chapter`, `thesis`, `report`, `conference`, `other`. Same names OpenAlex uses, with `preprint` carved out because it matters for supersession logic that paper_intake already does. OpenAlex itself has no `preprint` type, so the importer and graph fetcher detect preprints by DOI prefix (`10.48550/arXiv.*`, `10.21203/*`, `10.1101/*` for bioRxiv, and so on). This logic already lives in `paper_intake/resolver.py` and will be reused, not reimplemented.
 
-Required fields are the six that every record must have to be useful: `citekey`, `type`, `title`, `authors`, `year`, `added_at`. `modified_at` is also required but the store maintains it automatically. Everything else is optional and simply absent when unknown. The importer from Bookends will populate what it can and leave the rest out rather than emitting empty strings.
+Required fields are the six that every record must have to be useful: `citekey`, `type`, `title`, `authors`, `year`, `added_at`. `modified_at` is also required but the store maintains it automatically. The optional `published_at` field records an exact calendar date when a provider supplies one. Glean does not invent January 1 for records whose metadata contains only a year. Everything else is optional and simply absent when unknown. The importer from Bookends will populate what it can and leave the rest out rather than emitting empty strings.
 
 Legacy bare reference values remain readable: values containing `/` are interpreted as DOIs and other values as citekeys. Any later save rewrites them as typed scalars. JSON export keeps bare DOI/citekey values for compatibility and uses `openalex:` only where no legacy representation exists.
 
@@ -160,6 +161,7 @@ CREATE TABLE records (
   yaml_modified   TEXT NOT NULL,   -- from YAML's modified_at, ISO date
   title           TEXT NOT NULL,
   year            INTEGER,
+  published_at    TEXT,
   type            TEXT,
   doi             TEXT,
   arxiv           TEXT,
@@ -232,6 +234,8 @@ CREATE VIRTUAL TABLE fts USING fts5(
 
 The version-2 index additionally contains normalized `works`, `work_aliases`, `library_works`, and ordered `citation_edges` tables. DOI, OpenAlex ID, and citekey aliases can therefore converge on one work while bibliography order remains in `citation_edges.ord`. Durable `graph_jobs` rows hold queued/running/retry/failed state; successful status and provider provenance live in YAML and are mirrored on `records` for coverage queries. External titles/authors and their hydration state live only in `works` and are rebuildable. Read-only `outgoing` and `stubs` compatibility views derive the legacy shape for one migration cycle.
 
+The additive version-3 migration adds `records.published_at`, durable `publication_jobs`, and persistent publication-worker settings. Exact dates remain authoritative in YAML. Job state is local operational data and does not enter the synced catalog.
+
 The FTS `keywords` column contains both `keywords:` and `tags:` text, so `glean search proj-a` can find records tagged `proj-a`. Exact tag filtering should use `glean ls --tag <tag>`, which normalizes the argument and queries the `tags` table.
 
 Incoming citations join `citation_edges.target_work_id` to `library_works.work_id`; they are not stored separately. Alias resolution happens through `(kind, normalized_value)` in `work_aliases`.
@@ -267,6 +271,11 @@ glean graph out <citekey>                     # list outgoing, resolve stubs
 glean graph in  <citekey>                     # list incoming
 glean graph viz <citekey> [--depth N]         # pyvis HTML
 glean graph suggest [--min-citations N]       # unread cited by read
+
+glean dates status                            # exact-date coverage and queue state
+glean dates backfill --dry-run [--limit N]    # inspect or queue historical work
+glean dates pause | resume                    # persistent worker control
+glean dates retry <citekey>                    # high-priority retry
 
 glean import bookends <export.bib> [--dry-run] [--attachments DIR]
 ```
@@ -331,6 +340,8 @@ from glean.graph.queries import (
 
 Reference population is automatic but remains outside ingestion's network-critical path. `glean add` commits the record, enqueues a high-priority graph job, and returns without waiting for graph providers; duplicate adds self-heal missing graph state the same way. The persistent home `glean web` service owns a single worker that reconciles DOI-bearing records arriving through iCloud, applies the five-step retry schedule, pauses after repeated provider failures, and writes graph fields under a cross-process mutation lock. DOI-less records remain queryable through manual references and report automatic lookup as unsupported. Complete/empty graphs are not refreshed automatically in this rollout.
 
+Exact publication dates use a separate durable worker because graph-complete records may still lack them. New records take a complete Crossref date during normal DOI resolution. The home service then reconciles existing DOI-bearing records and tries Crossref followed by OpenAlex without blocking ingestion. A provider response that contains only a year is recorded as a terminal empty result, while network and rate-limit failures follow the same five-step retry schedule as graph jobs. The graph worker also saves an exact source date when its OpenAlex response supplies one. Every commit reloads the latest YAML under the cross-process mutation lock and merges only `published_at`, so concurrent notes or attachment edits survive.
+
 ## Integration contract
 
 Two downstream tools depend on glean. Their interfaces are fixed now even though the code swap happens in step 7.
@@ -342,10 +353,12 @@ Two downstream tools depend on glean. Their interfaces are fixed now even though
 JSON export includes `tags` as a list on every record. Records without tags emit an empty list so downstream tools can filter without schema probing.
 
 The library browse endpoint used by the native app, `GET /api/papers`, includes
-each record's `added_at` date. Its default order is publication year descending, then
-`added_at` descending within each year, with citekey ascending as the stable
-tie-breaker. This preserves newest-year sections while putting the most recent
-library additions at the top of each section.
+each record's `published_at` and `added_at` dates. Its default order is publication
+year descending, then exact publication date descending within each year. Records
+without an exact date fall back to `added_at`, and citekey is the stable tie-breaker.
+The Mac app uses the same hierarchy for offline SQLite reads and for its year/month
+fast-scroll rail. `GET /api/publication-dates/status` reports the background
+backfill coverage.
 
 ## Migration from Bookends
 

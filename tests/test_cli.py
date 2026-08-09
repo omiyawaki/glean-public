@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -250,6 +251,10 @@ def test_add_duplicate_returns_4(cli_env, monkeypatch, capsys):
         "SELECT state FROM graph_jobs WHERE citekey = ?",
         ("Miyawaki2024Attention",),
     ).fetchone() == ("queued",)
+    assert db.execute(
+        "SELECT state FROM publication_jobs WHERE citekey = ?",
+        ("Miyawaki2024Attention",),
+    ).fetchone() == ("queued",)
 
 
 def test_add_duplicate_detects_doi_case_mismatch(cli_env, monkeypatch, capsys):
@@ -299,6 +304,7 @@ def test_add_success(cli_env, monkeypatch, capsys):
             "journal": "Nature",
             "abstract": "",
             "year": "2026",
+            "published_at": "2026-05-03",
         },
     )
     main(["reindex", "--force"])
@@ -312,12 +318,17 @@ def test_add_success(cli_env, monkeypatch, capsys):
     r = cli_env.load("Smith2026Brand")
     assert r.doi == "10.1234/new-record"
     assert r.journal == "Nature"
+    assert r.published_at == date(2026, 5, 3)
     assert r.type == "journal-article"
     db = sqlite3.connect(os.environ["GLEAN_INDEX"])
     assert db.execute(
         "SELECT state, priority FROM graph_jobs WHERE citekey = ?",
         ("Smith2026Brand",),
     ).fetchone() == ("queued", 100)
+    assert db.execute(
+        "SELECT state FROM publication_jobs WHERE citekey = ?",
+        ("Smith2026Brand",),
+    ).fetchone() is None
 
 
 def test_add_success_fetches_and_attaches_pdf(cli_env, monkeypatch, capsys):
@@ -795,6 +806,28 @@ def test_graph_retry_rejects_doi_less_record(cli_env):
     assert main(["graph", "retry", "Vallis2019AOFD"]) == 6
 
 
+def test_dates_backfill_status_pause_resume_and_retry(cli_env, capsys):
+    assert main(["reindex", "--force"]) == 0
+    capsys.readouterr()
+
+    assert main(["dates", "backfill", "--dry-run", "--limit", "2"]) == 0
+    assert "would queue 2 paper(s)" in capsys.readouterr().out
+    assert main(["dates", "pause"]) == 0
+    capsys.readouterr()
+    assert main(["dates", "status"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["paused"] is True
+    assert status["eligible"] == 4
+    assert main(["dates", "retry", "Miyawaki2024Attention"]) == 0
+    assert main(["dates", "resume"]) == 0
+    assert "resumed" in capsys.readouterr().out
+
+
+def test_dates_retry_rejects_doi_less_record(cli_env):
+    assert main(["reindex", "--force"]) == 0
+    assert main(["dates", "retry", "Vallis2019AOFD"]) == 6
+
+
 def test_graph_fetch_no_doi_returns_6(cli_env):
     main(["reindex", "--force"])
     rc = main(["graph", "fetch", "Vallis2019AOFD"])
@@ -881,6 +914,24 @@ def test_set_int_year(cli_env):
     rc = main(["set", "Arakawa1974Schubert", "--set", "year=1975"])
     assert rc == 0
     assert cli_env.load("Arakawa1974Schubert").year == 1975
+
+
+def test_set_exact_publication_date(cli_env):
+    main(["reindex", "--force"])
+    rc = main([
+        "set", "Arakawa1974Schubert",
+        "--set", "published_at=1974-03-15",
+    ])
+    assert rc == 0
+    assert cli_env.load("Arakawa1974Schubert").published_at == date(1974, 3, 15)
+
+
+def test_set_rejects_invalid_publication_date(cli_env):
+    rc = main([
+        "set", "Arakawa1974Schubert",
+        "--set", "published_at=1974-02-31",
+    ])
+    assert rc == 6
 
 
 def test_set_bool_read(cli_env):

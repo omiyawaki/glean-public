@@ -21,6 +21,7 @@ def _openalex_work_response(doi: str, ref_ids: list[str]) -> dict:
         "doi": f"https://doi.org/{doi}",
         "title": "A fake paper",
         "publication_year": 2024,
+        "publication_date": "2024-03-14",
         "type": "article",
         "authorships": [{"author": {"display_name": "Jane Smith"}}],
         "referenced_works": [f"https://openalex.org/{rid}" for rid in ref_ids],
@@ -45,6 +46,7 @@ def test_openalex_fetch_combines_main_and_refs(cache_root):
     assert out is not None
     assert out["metadata"]["title"] == "A fake paper"
     assert out["metadata"]["authors"] == [{"family": "Smith", "given": "Jane"}]
+    assert out["metadata"]["published_at"] == "2024-03-14"
     assert out["references"] == ["10.2/a", "10.2/b"]
 
 
@@ -118,6 +120,7 @@ def test_crossref_fetch_extracts_refs(cache_root):
             "title": ["A paper"],
             "author": [{"family": "Smith", "given": "Jane"}],
             "issued": {"date-parts": [[2024]]},
+            "published-online": {"date-parts": [[2024, 5, 2]]},
             "type": "journal-article",
             "reference": [
                 {"DOI": "10.2/a"},
@@ -130,6 +133,7 @@ def test_crossref_fetch_extracts_refs(cache_root):
     assert out["references"] == ["10.2/a", "10.2/b"]
     assert out["metadata"]["authors"] == [{"family": "Smith", "given": "Jane"}]
     assert out["metadata"]["year"] == 2024
+    assert out["metadata"]["published_at"] == "2024-05-02"
 
 
 def test_crossref_returns_none_on_http_failure(cache_root):

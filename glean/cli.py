@@ -82,6 +82,8 @@ def cmd_info(args: argparse.Namespace) -> int:
     print(f"{r.citekey}  [{r.type}]")
     print(f"  {r.title}")
     print(f"  {_format_authors(r.authors)}  ({r.year})")
+    if r.published_at:
+        print(f"  published: {r.published_at.isoformat()}")
     bib = " ".join(filter(None, [
         r.journal,
         f"{r.volume}" if r.volume else None,
@@ -297,7 +299,9 @@ def _export_json(records: Iterable[Record]) -> str:
         out.append({
             "citekey": r.citekey, "type": r.type, "title": r.title,
             "authors": [{"family": a.family, "given": a.given} for a in r.authors],
-            "year": r.year, "doi": r.doi, "arxiv": r.arxiv,
+            "year": r.year,
+            "published_at": r.published_at.isoformat() if r.published_at else None,
+            "doi": r.doi, "arxiv": r.arxiv,
             "isbn": r.isbn, "pmid": r.pmid, "pmcid": r.pmcid,
             "legacy_citekey": r.legacy_citekey,
             "journal": r.journal, "volume": r.volume, "issue": r.issue,
@@ -468,8 +472,11 @@ def cmd_add(args: argparse.Namespace) -> int:
     ).fetchone()
     if existing:
         if lib.exists(existing[0]):
-            if lib.load(existing[0]).reference_graph is None:
+            existing_record = lib.load(existing[0])
+            if existing_record.reference_graph is None:
                 idx.enqueue_graph_job(existing[0], priority=100)
+            if existing_record.published_at is None:
+                idx.enqueue_publication_job(existing[0], priority=100)
             print(existing[0])
             return 4
         # The index points at a citekey whose YAML is missing on disk. Refresh
@@ -519,6 +526,14 @@ def cmd_add(args: argparse.Namespace) -> int:
         "preprint" if _paper_intake.is_preprint_doi(doi) else "journal-article"
     )
     arxiv = doi.split("arXiv.", 1)[1] if is_arxiv else None
+    published_at = None
+    if meta.get("published_at"):
+        try:
+            published_at = date.fromisoformat(str(meta["published_at"]))
+        except ValueError:
+            if not args.quiet:
+                _err(f"invalid publication date for {doi}: {meta['published_at']!r}")
+            return 6
 
     existing_citekeys = {
         row[0] for row in conn.execute("SELECT citekey FROM records")
@@ -534,6 +549,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         title=title,
         authors=authors,
         year=year,
+        published_at=published_at,
         doi=doi,
         arxiv=arxiv,
         journal=meta.get("journal") or None,
@@ -551,6 +567,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     lib.save(record)
     idx._upsert(record)
     idx.enqueue_graph_job(citekey, priority=100)
+    if record.published_at is None:
+        idx.enqueue_publication_job(citekey, priority=100)
     _try_fetch_pdf_for_record(lib, idx, record, doi, quiet=args.quiet)
     print(citekey)
     return 0
@@ -865,7 +883,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
 _SETTABLE = {
     "doi", "arxiv", "isbn", "pmid", "pmcid", "legacy_citekey",
     "journal", "volume", "issue", "pages", "publisher", "url",
-    "abstract", "notes", "year", "title", "read", "type",
+    "abstract", "notes", "year", "published_at", "title", "read", "type",
 }
 
 
@@ -891,6 +909,12 @@ def cmd_set(args: argparse.Namespace) -> int:
                 value = int(value)
             except ValueError:
                 _err(f"year must be an integer, got {value!r}")
+                return 6
+        elif key == "published_at":
+            try:
+                value = date.fromisoformat(value)
+            except ValueError:
+                _err(f"published_at must be an ISO date, got {value!r}")
                 return 6
         elif key == "read":
             value = value.lower() in ("true", "1", "yes", "y")
@@ -1128,6 +1152,65 @@ def cmd_graph_retry(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dates_status(args: argparse.Namespace) -> int:
+    idx = _ensure_indexed(_library())
+    idx.reconcile_publication_jobs()
+    print(json.dumps(idx.publication_status(), indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_dates_backfill(args: argparse.Namespace) -> int:
+    idx = _ensure_indexed(_library())
+    query = (
+        "SELECT citekey FROM records WHERE doi IS NOT NULL "
+        "AND published_at IS NULL ORDER BY year DESC, added_at DESC, citekey"
+    )
+    params: tuple[object, ...] = ()
+    if args.limit is not None:
+        query += " LIMIT ?"
+        params = (args.limit,)
+    citekeys = [row[0] for row in idx.connect().execute(query, params)]
+    if args.dry_run:
+        print(f"would queue {len(citekeys)} paper(s)")
+        return 0
+    for citekey in citekeys:
+        idx.enqueue_publication_job(citekey, priority=10)
+    print(f"queued {len(citekeys)} paper(s)")
+    return 0
+
+
+def cmd_dates_pause(args: argparse.Namespace) -> int:
+    idx = _ensure_indexed(_library())
+    idx.set_publication_paused(True)
+    print("publication-date worker paused")
+    return 0
+
+
+def cmd_dates_resume(args: argparse.Namespace) -> int:
+    idx = _ensure_indexed(_library())
+    idx.set_publication_paused(False)
+    idx.reconcile_publication_jobs()
+    print("publication-date worker resumed")
+    return 0
+
+
+def cmd_dates_retry(args: argparse.Namespace) -> int:
+    lib = _library()
+    idx = _ensure_indexed(lib)
+    if not lib.exists(args.citekey):
+        _err(f"not found: {args.citekey}")
+        return 1
+    if not idx.enqueue_publication_job(args.citekey, priority=100):
+        record = lib.load(args.citekey)
+        if record.published_at is not None:
+            _err(f"{args.citekey} already has a publication date")
+        else:
+            _err(f"{args.citekey} has no DOI; cannot fetch")
+        return 6
+    print(f"queued {args.citekey}")
+    return 0
+
+
 def cmd_graph_viz(args: argparse.Namespace) -> int:
     from pyvis.network import Network
     from glean.graph.queries import outgoing_for, Stub
@@ -1277,6 +1360,27 @@ def _build_parser() -> argparse.ArgumentParser:
     srvp.add_argument("--host", default="0.0.0.0")
     srvp.add_argument("--port", type=int, default=8766)
     srvp.set_defaults(func=cmd_serve)
+
+    dp = sub.add_parser("dates", help="publication-date metadata operations")
+    dsub = dp.add_subparsers(dest="dates_sub", required=True)
+
+    dstatus = dsub.add_parser("status", help="show publication-date coverage")
+    dstatus.set_defaults(func=cmd_dates_status)
+
+    dbackfill = dsub.add_parser("backfill", help="queue missing publication dates")
+    dbackfill.add_argument("--dry-run", action="store_true")
+    dbackfill.add_argument("--limit", type=int)
+    dbackfill.set_defaults(func=cmd_dates_backfill)
+
+    dpause = dsub.add_parser("pause", help="pause automatic publication-date lookup")
+    dpause.set_defaults(func=cmd_dates_pause)
+
+    dresume = dsub.add_parser("resume", help="resume automatic publication-date lookup")
+    dresume.set_defaults(func=cmd_dates_resume)
+
+    dretry = dsub.add_parser("retry", help="queue one paper for publication-date lookup")
+    dretry.add_argument("citekey")
+    dretry.set_defaults(func=cmd_dates_retry)
 
     gp = sub.add_parser("graph", help="citation graph operations")
     gpsub = gp.add_subparsers(dest="graph_sub", required=True)

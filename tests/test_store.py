@@ -75,6 +75,21 @@ def test_round_trip_is_idempotent_in_memory(lib: Library):
     assert text1 == text2
 
 
+def test_publication_date_round_trips_and_survives_stale_save(lib: Library):
+    stale = lib.load("Miyawaki2024Attention")
+    enriched = lib.load("Miyawaki2024Attention")
+    enriched.published_at = date(2024, 3, 14)
+    lib.save(enriched, today=date(2026, 8, 9))
+
+    stale.notes = "concurrent note"
+    lib.save(stale, today=date(2026, 8, 9))
+
+    stored = lib.load("Miyawaki2024Attention")
+    assert stored.published_at == date(2024, 3, 14)
+    assert stored.notes == "concurrent note"
+    assert "published_at: 2024-03-14" in dumps(stored)
+
+
 def test_legacy_references_migrate_to_typed_scalars_on_write(lib: Library):
     record = lib.load("Miyawaki2024Attention")
 

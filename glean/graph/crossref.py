@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import date
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -75,18 +76,32 @@ def _normalize_metadata(msg: dict) -> dict:
     issued = (msg.get("issued") or {}).get("date-parts") or [[]]
     if issued and issued[0]:
         year = issued[0][0]
+    published_at = None
+    for key in ("published", "published-online", "published-print", "issued"):
+        date_parts = (msg.get(key) or {}).get("date-parts") or []
+        if not date_parts or len(date_parts[0]) < 3:
+            continue
+        try:
+            published_at = date(*map(int, date_parts[0][:3])).isoformat()
+        except (TypeError, ValueError):
+            continue
+        break
     return {
         "doi": msg.get("DOI"),
         "title": title,
         "authors": authors,
         "year": year,
+        "published_at": published_at,
         "type": msg.get("type"),
     }
 
 
-def fetch(doi: str, *, http_get: Callable[[str], Optional[dict]] = _default_http_get,
-          ttl_days: int = DEFAULT_TTL_DAYS) -> Optional[dict]:
-    """Return {metadata: {...}, references: [doi, ...]} or None on failure."""
+def _fetch_message(
+    doi: str,
+    *,
+    http_get: Callable[[str], Optional[dict]],
+    ttl_days: int,
+) -> Optional[dict]:
     cached = _cache_get(doi, ttl_days)
     if cached is not None:
         data = cached
@@ -96,7 +111,26 @@ def fetch(doi: str, *, http_get: Callable[[str], Optional[dict]] = _default_http
         if data is None:
             return None
         _cache_put(doi, data)
-    msg = data.get("message") or {}
+    return data.get("message") or {}
+
+
+def fetch_metadata(
+    doi: str,
+    *,
+    http_get: Callable[[str], Optional[dict]] = _default_http_get,
+    ttl_days: int = DEFAULT_TTL_DAYS,
+) -> Optional[dict]:
+    """Fetch normalized source metadata without resolving references."""
+    message = _fetch_message(doi, http_get=http_get, ttl_days=ttl_days)
+    return _normalize_metadata(message) if message is not None else None
+
+
+def fetch(doi: str, *, http_get: Callable[[str], Optional[dict]] = _default_http_get,
+          ttl_days: int = DEFAULT_TTL_DAYS) -> Optional[dict]:
+    """Return {metadata: {...}, references: [doi, ...]} or None on failure."""
+    msg = _fetch_message(doi, http_get=http_get, ttl_days=ttl_days)
+    if msg is None:
+        return None
     ref_dois = []
     for ref in msg.get("reference") or []:
         d = ref.get("DOI")

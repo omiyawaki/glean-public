@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import sys
 import time
 from typing import Callable, Optional
@@ -154,8 +154,17 @@ class GraphWorker:
                 seen.add(key)
 
         fetched_at = self.now().date()
+        source_metadata = result.get("metadata") or {}
+        published_at = None
+        if source_metadata.get("published_at"):
+            try:
+                published_at = date.fromisoformat(str(source_metadata["published_at"]))
+            except ValueError:
+                published_at = None
         with self.library.mutation_lock():
             latest = self.library.load(citekey)
+            if latest.published_at is None and published_at is not None:
+                latest.published_at = published_at
             latest.references = references
             latest.reference_graph = ReferenceGraphState(
                 status="complete" if references else "empty",
@@ -164,7 +173,6 @@ class GraphWorker:
             )
             self.library._save_unlocked(latest, today=fetched_at)
             self.index._upsert(latest)
-            source_metadata = result.get("metadata") or {}
             if source_metadata:
                 self.index.upsert_work_metadata(
                     source_metadata,

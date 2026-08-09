@@ -40,7 +40,7 @@ from glean.schema import (
 
 
 CANONICAL_ORDER = [
-    "citekey", "type", "title", "authors", "year",
+    "citekey", "type", "title", "authors", "year", "published_at",
     "doi", "arxiv", "isbn", "pmid", "pmcid", "legacy_citekey",
     "journal", "volume", "issue", "pages", "publisher", "url",
     "abstract", "keywords", "tags", "attachments",
@@ -106,6 +106,8 @@ def _record_to_commented_map(r: Record) -> CommentedMap:
     m["authors"] = authors
 
     m["year"] = r.year
+    if r.published_at is not None:
+        m["published_at"] = r.published_at
 
     for field_name in (
         "doi", "arxiv", "isbn", "pmid", "pmcid", "legacy_citekey",
@@ -173,6 +175,9 @@ def _record_from_dict(d: dict) -> Record:
     attachments_raw = d.get("attachments") or []
     attachments = [Attachment(path=a["path"], kind=a["kind"]) for a in attachments_raw]
 
+    published_at = d.get("published_at")
+    if isinstance(published_at, str):
+        published_at = date.fromisoformat(published_at)
     added_at = d.get("added_at")
     if isinstance(added_at, str):
         added_at = date.fromisoformat(added_at)
@@ -200,6 +205,7 @@ def _record_from_dict(d: dict) -> Record:
         title=d["title"],
         authors=authors,
         year=d["year"],
+        published_at=published_at,
         added_at=added_at,
         modified_at=modified_at,
         doi=d.get("doi"),
@@ -338,6 +344,8 @@ class Library:
             destination = self.path_for(record.citekey)
             if destination.is_file():
                 current = loads(_read_record_text(destination))
+                if current.published_at is not None and record.published_at is None:
+                    record.published_at = current.published_at
                 incoming_graph = record.reference_graph
                 current_graph = current.reference_graph
                 if current_graph is not None and (

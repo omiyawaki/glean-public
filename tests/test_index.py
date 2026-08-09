@@ -26,7 +26,7 @@ def test_index_uses_versioned_schema(index: Index):
     }
     assert {
         "works", "work_aliases", "library_works", "citation_edges", "graph_jobs",
-        "outgoing", "stubs",
+        "publication_jobs", "outgoing", "stubs",
     } <= tables
     object_types = dict(
         index.connect().execute(
@@ -166,6 +166,59 @@ def test_record_rewrite_preserves_graph_retry_state(index: Index, lib: Library):
     assert job is not None
     assert job["state"] == "retry_wait"
     assert job["attempts"] == 1
+
+
+def test_record_rewrite_preserves_publication_retry_state(index: Index, lib: Library):
+    from datetime import datetime, timezone
+
+    index.rebuild()
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    index.enqueue_publication_job("Miyawaki2024Attention", now=now)
+    assert index.claim_publication_job(now=now) == "Miyawaki2024Attention"
+    index.fail_publication_job("Miyawaki2024Attention", "offline", now=now)
+
+    record = lib.load("Miyawaki2024Attention")
+    record.notes = "unrelated edit"
+    lib.save(record, today=date(2026, 8, 9))
+    index._upsert(record)
+
+    job = index.publication_job("Miyawaki2024Attention")
+    assert job is not None
+    assert job["state"] == "retry_wait"
+    assert job["attempts"] == 1
+
+
+def test_publication_reconciliation_accounts_for_missing_dates(index: Index):
+    index.rebuild()
+
+    index.reconcile_publication_jobs()
+    status = index.publication_status()
+
+    assert status["total"] == 5
+    assert status["eligible"] > 0
+    assert status["queued"] == status["eligible"]
+    assert status["complete"] == 0
+
+
+def test_publication_coverage_counts_only_doi_records_as_eligible_complete(
+    index: Index,
+    lib: Library,
+):
+    index.rebuild()
+    doi_record = lib.load("Miyawaki2024Attention")
+    doi_record.published_at = date(2024, 6, 15)
+    lib.save(doi_record, today=date(2026, 8, 9))
+    index._upsert(doi_record)
+
+    no_doi_record = lib.load("Vallis2019AOFD")
+    no_doi_record.published_at = date(1965, 1, 15)
+    lib.save(no_doi_record, today=date(2026, 8, 9))
+    index._upsert(no_doi_record)
+    index.reconcile_publication_jobs()
+
+    status = index.publication_status()
+    assert status["complete"] == 1
+    assert status["eligible"] + status["unsupported"] == status["total"]
 
 
 def test_stubs_populated_for_unresolved_targets(index: Index):

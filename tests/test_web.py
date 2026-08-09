@@ -195,7 +195,7 @@ def test_list_delta_returns_snapshot_when_version_changed():
     assert delta["unchanged"] is False
 
 
-def test_list_papers_orders_each_year_by_added_date(tmp_path: Path):
+def test_list_papers_orders_each_year_by_publication_date(tmp_path: Path):
     lib = Library(tmp_path / "library")
     records = [
         Record(
@@ -204,7 +204,8 @@ def test_list_papers_orders_each_year_by_added_date(tmp_path: Path):
             title="Older 2026 addition",
             authors=[Author(family="Alpha", given="A.")],
             year=2026,
-            added_at=date(2026, 4, 1),
+            published_at=date(2026, 4, 1),
+            added_at=date(2026, 6, 1),
             modified_at=None,
         ),
         Record(
@@ -213,7 +214,8 @@ def test_list_papers_orders_each_year_by_added_date(tmp_path: Path):
             title="Newer 2026 addition",
             authors=[Author(family="Zulu", given="Z.")],
             year=2026,
-            added_at=date(2026, 5, 1),
+            published_at=date(2026, 5, 1),
+            added_at=date(2026, 4, 1),
             modified_at=None,
         ),
         Record(
@@ -222,6 +224,7 @@ def test_list_papers_orders_each_year_by_added_date(tmp_path: Path):
             title="Newest addition from an older year",
             authors=[Author(family="Beta", given="B.")],
             year=2025,
+            published_at=date(2025, 12, 1),
             added_at=date(2026, 6, 1),
             modified_at=None,
         ),
@@ -238,7 +241,7 @@ def test_list_papers_orders_each_year_by_added_date(tmp_path: Path):
         "Alpha2026Older",
         "Beta2025NewestAddition",
     ]
-    assert body["entries"][0]["added_at"] == "2026-05-01"
+    assert body["entries"][0]["published_at"] == "2026-05-01"
 
 
 def test_papers_snapshot_serves_last_complete_body_during_refresh(tmp_path: Path):

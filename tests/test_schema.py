@@ -23,6 +23,11 @@ def test_validate_ok():
     validate(make_record())
 
 
+def test_validate_rejects_non_date_publication_date():
+    with pytest.raises(ValidationError, match="published_at must be a date"):
+        validate(make_record(published_at="2024-03-14"))
+
+
 def test_validate_rejects_bad_citekey():
     with pytest.raises(ValidationError):
         validate(make_record(citekey="has space"))
