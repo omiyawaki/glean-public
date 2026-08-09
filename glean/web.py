@@ -44,8 +44,8 @@ def _list_entries(idx: Index) -> list[dict]:
     """All records for the library browse view, joined with authors."""
     conn = idx.connect()
     rows = conn.execute(
-        "SELECT citekey, title, year, doi FROM records "
-        "ORDER BY year DESC NULLS LAST, citekey ASC"
+        "SELECT citekey, title, year, doi, added_at FROM records "
+        "ORDER BY year DESC NULLS LAST, added_at DESC NULLS LAST, citekey ASC"
     ).fetchall()
     by_ck: dict[str, list[dict]] = {}
     for ck, family, given in conn.execute(
@@ -53,12 +53,13 @@ def _list_entries(idx: Index) -> list[dict]:
     ):
         by_ck.setdefault(ck, []).append({"family": family, "given": given or ""})
     entries = []
-    for ck, title, year, doi in rows:
+    for ck, title, year, doi, added_at in rows:
         entries.append({
             "citekey": ck,
             "title": title,
             "year": year,
             "doi": doi,
+            "added_at": added_at,
             "authors": by_ck.get(ck, []),
         })
     return entries

@@ -341,6 +341,12 @@ Two downstream tools depend on glean. Their interfaces are fixed now even though
 
 JSON export includes `tags` as a list on every record. Records without tags emit an empty list so downstream tools can filter without schema probing.
 
+The library browse endpoint used by the native app, `GET /api/papers`, includes
+each record's `added_at` date. Its default order is publication year descending, then
+`added_at` descending within each year, with citekey ascending as the stable
+tie-breaker. This preserves newest-year sections while putting the most recent
+library additions at the top of each section.
+
 ## Migration from Bookends
 
 Path: Bookends → BibTeX via AppleScript → `glean import bookends`.

@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 import gzip
 import json
@@ -192,6 +193,52 @@ def test_list_delta_returns_snapshot_when_version_changed():
     assert delta["count"] == 1
     assert delta["entries"] == entries
     assert delta["unchanged"] is False
+
+
+def test_list_papers_orders_each_year_by_added_date(tmp_path: Path):
+    lib = Library(tmp_path / "library")
+    records = [
+        Record(
+            citekey="Alpha2026Older",
+            type="journal-article",
+            title="Older 2026 addition",
+            authors=[Author(family="Alpha", given="A.")],
+            year=2026,
+            added_at=date(2026, 4, 1),
+            modified_at=None,
+        ),
+        Record(
+            citekey="Zulu2026Newer",
+            type="journal-article",
+            title="Newer 2026 addition",
+            authors=[Author(family="Zulu", given="Z.")],
+            year=2026,
+            added_at=date(2026, 5, 1),
+            modified_at=None,
+        ),
+        Record(
+            citekey="Beta2025NewestAddition",
+            type="journal-article",
+            title="Newest addition from an older year",
+            authors=[Author(family="Beta", given="B.")],
+            year=2025,
+            added_at=date(2026, 6, 1),
+            modified_at=None,
+        ),
+    ]
+    for record in records:
+        lib.save(record)
+    index = Index(lib, tmp_path / "ordered-index.sqlite")
+    index.rebuild()
+
+    body = _list_papers(index)
+
+    assert [entry["citekey"] for entry in body["entries"]] == [
+        "Zulu2026Newer",
+        "Alpha2026Older",
+        "Beta2025NewestAddition",
+    ]
+    assert body["entries"][0]["added_at"] == "2026-05-01"
 
 
 def test_papers_snapshot_serves_last_complete_body_during_refresh(tmp_path: Path):
