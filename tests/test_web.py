@@ -309,6 +309,39 @@ def test_papers_snapshot_serves_last_complete_body_during_refresh(tmp_path: Path
     ]
 
 
+def test_papers_snapshot_publishes_intact_index_when_yaml_refresh_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    lib = Library(tmp_path / "library")
+    record = Record(
+        citekey="Alpha2026First",
+        type="journal-article",
+        title="First",
+        authors=[Author(family="Alpha", given="A.")],
+        year=2026,
+        doi="10.1234/alpha",
+    )
+    lib.save(record)
+    index = Index(lib, tmp_path / "index.sqlite")
+    index.rebuild()
+    snapshot = PapersSnapshot.from_index(index)
+    assert snapshot.body()["entries"][0]["published_at"] is None
+
+    record = lib.load(record.citekey)
+    record.published_at = date(2026, 5, 3)
+    lib.save(record)
+    index._upsert(record)
+    monkeypatch.setattr(
+        index,
+        "refresh",
+        lambda: (_ for _ in ()).throw(RuntimeError("protected library unavailable")),
+    )
+
+    assert snapshot.refresh_from_index(index, phase="test") is False
+    assert snapshot.body()["entries"][0]["published_at"] == "2026-05-03"
+
+
 def test_references_response_is_ordered_and_normalized(lib: Library, tmp_path: Path):
     index = Index(lib, tmp_path / "relations.sqlite")
     index.rebuild()

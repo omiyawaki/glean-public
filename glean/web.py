@@ -131,12 +131,19 @@ class PapersSnapshot:
             return _delta_for_body(self._body, since=since)
 
     def refresh_from_index(self, idx: Index, *, phase: str) -> bool:
-        if not _refresh_index(idx, phase=phase):
+        refreshed = _refresh_index(idx, phase=phase)
+        try:
+            body = _list_papers(idx)
+        except Exception as exc:
+            print(
+                f"glean web {phase} snapshot publish failed: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
             return False
-        body = _list_papers(idx)
         with self._lock:
             self._body = body
-        return True
+        return refreshed
 
 
 def _json_response(
