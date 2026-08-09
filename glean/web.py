@@ -182,10 +182,10 @@ def _accepts_gzip(headers) -> bool:
 def _record_detail(lib: Library, citekey: str) -> dict | None:
     """Full YAML-backed record. Reads disk; called on-demand when the
     Mac client opens a row, so per-request cost is fine."""
-    path = lib.path_for(citekey)
-    if not path.is_file():
+    try:
+        record = lib.load(citekey)
+    except FileNotFoundError:
         return None
-    record = lib.load(citekey)
     return {
         "citekey": record.citekey,
         "type": record.type,
@@ -211,6 +211,61 @@ def _record_detail(lib: Library, citekey: str) -> dict | None:
         "read": bool(record.read),
         "notes": record.notes or "",
     }
+
+
+def _record_detail_response(lib: Library, citekey: str) -> tuple[int, dict]:
+    """Return a structured result even when protected-library reads fail."""
+    try:
+        detail = _record_detail(lib, citekey)
+    except Exception as exc:
+        print(
+            f"glean web detail read failed for {citekey}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 503, {
+            "error": "library unavailable",
+            "code": "library_unavailable",
+            "detail": str(exc),
+            "citekey": citekey,
+        }
+    if detail is None:
+        return 404, {"error": "not found", "citekey": citekey}
+    return 200, detail
+
+
+def _library_health(lib: Library, snapshot: PapersSnapshot) -> tuple[int, dict]:
+    """Probe a real YAML record so health reflects Documents access."""
+    body = snapshot.body()
+    entries = body.get("entries") or []
+    result = {
+        "ok": False,
+        "ready": False,
+        "library_access": False,
+        "count": int(body.get("count") or 0),
+        "record_probe": "",
+    }
+    if not entries:
+        result["error"] = "no indexed record available for protected-library probe"
+        return 503, result
+    errors = []
+    for entry in entries[:10]:
+        probe_citekey = entry.get("citekey") or ""
+        if not probe_citekey:
+            continue
+        result["record_probe"] = probe_citekey
+        try:
+            lib.load(probe_citekey)
+        except PermissionError as exc:
+            result["error"] = str(exc)
+            return 503, result
+        except Exception as exc:
+            errors.append(f"{probe_citekey}: {exc}")
+            continue
+        result.update({"ok": True, "ready": True, "library_access": True})
+        return 200, result
+    result["error"] = "; ".join(errors) or "no readable record available for probe"
+    return 503, result
 
 
 def _start_refresh_thread(idx: Index, snapshot: PapersSnapshot) -> None:
@@ -252,7 +307,8 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/health":
-                return self._json(200, {"ok": True})
+                status, body = _library_health(lib, snapshot)
+                return self._json(status, body)
             if parsed.path == "/api/papers":
                 return self._json(200, snapshot.body())
             if parsed.path == "/api/papers/delta":
@@ -264,10 +320,8 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
                 )
             if parsed.path.startswith("/api/papers/"):
                 citekey = urllib.parse.unquote(parsed.path[len("/api/papers/"):])
-                detail = _record_detail(lib, citekey)
-                if detail is None:
-                    return self._json(404, {"error": "not found"})
-                return self._json(200, detail)
+                status, body = _record_detail_response(lib, citekey)
+                return self._json(status, body)
             self.send_response(404)
             self.end_headers()
 

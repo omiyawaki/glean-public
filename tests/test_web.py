@@ -12,7 +12,9 @@ from glean.web import (
     _json_response,
     _list_delta,
     _list_papers,
+    _library_health,
     _record_detail,
+    _record_detail_response,
     _refresh_index,
     _versioned_list_body,
 )
@@ -73,6 +75,50 @@ def test_record_detail_retries_transient_deadlock(lib: Library, monkeypatch):
     assert detail is not None
     assert detail["citekey"] == "Miyawaki2024Attention"
     assert calls == 1
+
+
+def test_record_detail_permission_failure_is_structured_503(lib: Library, monkeypatch):
+    def denied(_citekey: str):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(lib, "load", denied)
+
+    status, body = _record_detail_response(lib, "Miyawaki2024Attention")
+
+    assert status == 503
+    assert body["code"] == "library_unavailable"
+    assert body["citekey"] == "Miyawaki2024Attention"
+    assert "Operation not permitted" in body["detail"]
+
+
+def test_health_probes_an_actual_record(lib: Library, tmp_path: Path):
+    index = Index(lib, tmp_path / "health-index.sqlite")
+    _refresh_index(index, phase="test")
+    snapshot = PapersSnapshot.from_index(index)
+
+    status, body = _library_health(lib, snapshot)
+
+    assert status == 200
+    assert body["ready"] is True
+    assert body["library_access"] is True
+    assert body["record_probe"]
+
+
+def test_health_reports_permission_loss(lib: Library, tmp_path: Path, monkeypatch):
+    index = Index(lib, tmp_path / "denied-index.sqlite")
+    _refresh_index(index, phase="test")
+    snapshot = PapersSnapshot.from_index(index)
+
+    def denied(_citekey: str):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(lib, "load", denied)
+    status, body = _library_health(lib, snapshot)
+
+    assert status == 503
+    assert body["ready"] is False
+    assert body["library_access"] is False
+    assert "Operation not permitted" in body["error"]
 
 
 def test_json_response_sets_etag_and_supports_not_modified():

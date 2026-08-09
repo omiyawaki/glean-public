@@ -12,8 +12,8 @@ Design: [`DESIGN.md`](DESIGN.md).
 
 This installs `glean` into the shared Pixi `tools` environment, installs
 Playwright's Chromium browser for PDF fetching, and verifies the CLI. On
-`work` and `home`, it also installs the signed Tools Python Runner and loads
-the Glean web LaunchAgent after the runner's Documents access probe passes.
+`home`, it also installs the signed Tools Python Runner and loads the Glean
+web LaunchAgent after the runner's Documents access probe passes. 
 
 ## Status
 
