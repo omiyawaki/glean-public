@@ -12,10 +12,10 @@ Design: [`DESIGN.md`](DESIGN.md).
 
 This installs `glean` into the shared Pixi `tools` environment, installs
 Playwright's Chromium browser for PDF fetching, and verifies the CLI. On
-`home`, it also installs the signed Tools Python Runner and loads the Glean
+`server`, it also installs the signed Tools Python Runner and loads the Glean
 web LaunchAgent after the runner's Documents access probe passes. 
 
-The home web service also owns the persistent, single-concurrency citation
+The server web service also owns the persistent, single-concurrency citation
 worker. New DOI-bearing papers are queued after they are saved; existing
 records are reconciled in the background. Use `glean graph status`,
 `glean graph backfill --dry-run`, `glean graph pause`, `glean graph resume`,

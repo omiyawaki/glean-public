@@ -25,12 +25,12 @@ pixi run --manifest-path "$MANIFEST" --environment tools \
 pixi run --manifest-path "$MANIFEST" --environment tools glean --help >/dev/null
 
 case "$HOST" in
-    home) ;;
+    server) ;;
     work)
         launchctl bootout "$DOMAIN" "$PLIST_DEST" 2>/dev/null || true
         launchctl disable "$DOMAIN/com.miyawaki.glean-web" 2>/dev/null || true
         rm -f "$PLIST_DEST"
-        echo "Glean web migrated to home; stale LaunchAgent disabled."
+        echo "Glean web migrated to server; stale LaunchAgent disabled."
         exit 0
         ;;
     *)
