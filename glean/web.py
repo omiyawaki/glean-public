@@ -340,7 +340,7 @@ def _start_refresh_thread(idx: Index, snapshot: PapersSnapshot) -> None:
 
 
 def _start_graph_worker(lib: Library, db_path: Path) -> None:
-    """Run one durable enrichment worker owned by the home web service."""
+    """Run one durable enrichment worker owned by the server web service."""
     def loop() -> None:
         worker_index = Index(lib, db_path)
         worker = GraphWorker(lib, worker_index)
@@ -350,7 +350,7 @@ def _start_graph_worker(lib: Library, db_path: Path) -> None:
 
 
 def _start_publication_worker(lib: Library, db_path: Path) -> None:
-    """Run one durable publication-date worker owned by the home service."""
+    """Run one durable publication-date worker owned by the server service."""
     def loop() -> None:
         worker_index = Index(lib, db_path)
         worker = PublicationWorker(lib, worker_index)
