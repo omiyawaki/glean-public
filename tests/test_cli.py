@@ -162,6 +162,19 @@ def test_rm(cli_env):
     assert not cli_env.exists("Miyawaki2023Transformer")
 
 
+def test_rm_cascades_attachment_files(cli_env):
+    record = cli_env.load("Miyawaki2024Attention")
+    pdf = cli_env.root / record.attachments[0].path
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    rc = main(["rm", "Miyawaki2024Attention"])
+
+    assert rc == 0
+    assert not cli_env.exists("Miyawaki2024Attention")
+    assert not pdf.exists()
+
+
 def test_rename_rewrites_refs(cli_env):
     # Miyawaki2024Attention references Sellers1965PhysicalClimatology as a citekey.
     # Rename that citekey (even though the target record doesn't exist in library,

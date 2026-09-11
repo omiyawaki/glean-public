@@ -383,7 +383,44 @@ class Library:
 
     def delete(self, citekey: str) -> None:
         with self.mutation_lock():
-            self.path_for(citekey).unlink()
+            path = self.path_for(citekey)
+            record = None
+            try:
+                record = loads(_read_record_text(path))
+            except FileNotFoundError:
+                raise
+            except Exception:
+                record = None
+            path.unlink()
+            if record is not None:
+                self._delete_attachments_unlocked(record)
+
+    def _delete_attachments_unlocked(self, record: Record) -> None:
+        attachments_root = self.attachments_dir.resolve()
+        for attachment in record.attachments:
+            target = self._resolved_library_attachment(attachment.path, attachments_root)
+            if target is None:
+                continue
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                continue
+
+    def _resolved_library_attachment(
+        self, relative_path: str, attachments_root: Path
+    ) -> Optional[Path]:
+        raw = (relative_path or "").strip()
+        if not raw:
+            return None
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.root / candidate
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(attachments_root)
+        except (OSError, ValueError):
+            return None
+        return resolved
 
     def iter_records(self) -> Iterator[Record]:
         if not self.records_dir.is_dir():

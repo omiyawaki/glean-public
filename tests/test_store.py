@@ -202,6 +202,46 @@ def test_delete(lib: Library):
     assert not lib.exists("Miyawaki2023Transformer")
 
 
+def test_delete_removes_listed_attachment_files(lib: Library):
+    record = lib.load("Miyawaki2024Attention")
+    files = []
+    for attachment in record.attachments:
+        path = lib.root / attachment.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"%PDF-1.4\n")
+        files.append(path)
+
+    lib.delete("Miyawaki2024Attention")
+
+    assert not lib.exists("Miyawaki2024Attention")
+    for path in files:
+        assert not path.exists()
+
+
+def test_delete_tolerates_missing_attachment_files(lib: Library):
+    record = lib.load("Miyawaki2024Attention")
+    assert record.attachments
+    missing = lib.root / record.attachments[0].path
+    assert not missing.exists()
+
+    lib.delete("Miyawaki2024Attention")
+
+    assert not lib.exists("Miyawaki2024Attention")
+
+
+def test_delete_ignores_attachment_paths_outside_library(lib: Library, tmp_path: Path):
+    outsider = tmp_path / "outside.pdf"
+    outsider.write_bytes(b"%PDF-1.4\n")
+    record = lib.load("Miyawaki2023Transformer")
+    record.attachments = [Attachment(path=str(outsider), kind="main")]
+    lib.save(record)
+
+    lib.delete("Miyawaki2023Transformer")
+
+    assert not lib.exists("Miyawaki2023Transformer")
+    assert outsider.exists()
+
+
 def test_attachment_filename_single_author():
     r = Record(
         citekey="X", type="journal-article", title="A neat title",
