@@ -406,6 +406,72 @@ class Library:
             except FileNotFoundError:
                 continue
 
+    def planned_main_attachment_path(self, record: Record) -> str:
+        """Relative path the Mac should write into iCloud for the main PDF.
+
+        An existing main attachment path wins, including when the file itself
+        lives only in iCloud and is absent from this library root. Otherwise
+        the next unused filename under the attachment naming policy is used.
+        """
+        for attachment in record.attachments:
+            if attachment.kind != "main":
+                continue
+            relative = self.validated_attachment_relative(attachment.path)
+            if relative is not None:
+                return relative
+        for collision_index in (None, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+            name = attachment_filename(
+                record, kind="main", collision_index=collision_index
+            )
+            relative = f"attachments/{name}"
+            if not (self.root / relative).exists():
+                return relative
+        raise RuntimeError(
+            f"too many attachment-name collisions for {record.citekey}"
+        )
+
+    def set_main_attachment_path(self, record: Record, relative_path: str) -> str:
+        """Record the main PDF path without copying bytes onto this machine."""
+        planned = self.planned_main_attachment_path(record)
+        if relative_path != planned:
+            raise ValueError(f"unexpected attachment path: {relative_path}")
+        if any(
+            attachment.kind == "main" and attachment.path == planned
+            for attachment in record.attachments
+        ):
+            return planned
+        record.attachments = [
+            attachment for attachment in record.attachments if attachment.kind != "main"
+        ]
+        record.attachments.append(Attachment(path=planned, kind="main"))
+        self.save(record)
+        return planned
+
+    def main_attachment_file(self, record: Record) -> Optional[Path]:
+        """Resolved main PDF inside this library, whether or not it exists."""
+        for attachment in record.attachments:
+            if attachment.kind != "main":
+                continue
+            relative = self.validated_attachment_relative(attachment.path)
+            if relative is None:
+                return None
+            return self.root / relative
+        return None
+
+    def release_main_attachment_file(self, record: Record) -> bool:
+        """Delete this machine's copy of the main PDF after iCloud has it."""
+        path = self.main_attachment_file(record)
+        if path is None or not path.is_file():
+            return False
+        path.unlink()
+        return True
+
+    def validated_attachment_relative(self, relative_path: str) -> Optional[str]:
+        raw = (relative_path or "").strip()
+        if not re.fullmatch(r"attachments/[^/]+\.pdf", raw):
+            return None
+        return raw
+
     def _resolved_library_attachment(
         self, relative_path: str, attachments_root: Path
     ) -> Optional[Path]:

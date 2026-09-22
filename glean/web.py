@@ -1,8 +1,10 @@
 """HTTP API for browsing the glean library.
 
 Designed for consumption by the native macOS frontend (glean.app).
-The paper list and details are read-only. Citation relations expose one
-idempotent retry mutation for failed background enrichment jobs.
+The paper list and details are read-only except for the attachment
+endpoints the Mac uses to record an iCloud PDF path and to pull a PDF
+that was fetched on the server. Citation relations expose one idempotent
+retry mutation for failed background enrichment jobs.
 
 The list endpoint queries the SQLite index — fast (~ms for thousands
 of records), independent of YAML reparse cost. A background thread
@@ -26,6 +28,7 @@ from pathlib import Path
 from glean.index import Index
 from glean.graph.worker import GraphWorker
 from glean.publication import PublicationWorker
+from glean.schema import Record
 from glean.store import Library
 
 
@@ -249,6 +252,77 @@ def _record_detail_response(lib: Library, citekey: str) -> tuple[int, dict]:
     return 200, detail
 
 
+def _attachment_action(suffix: str) -> tuple[str, str] | None:
+    for action in (
+        "/pdf",
+        "/attachment-plan",
+        "/attachment-commit",
+        "/attachment-release",
+    ):
+        if suffix.endswith(action):
+            citekey = urllib.parse.unquote(suffix[: -len(action)])
+            return citekey, action[1:]
+    return None
+
+
+def _load_record_response(lib: Library, citekey: str) -> tuple[int, dict] | Record:
+    try:
+        return lib.load(citekey)
+    except FileNotFoundError:
+        return 404, {"ok": False, "error": "not found", "citekey": citekey}
+
+
+def attachment_plan(lib: Library, citekey: str) -> tuple[int, dict]:
+    loaded = _load_record_response(lib, citekey)
+    if isinstance(loaded, tuple):
+        return loaded
+    try:
+        relative_path = lib.planned_main_attachment_path(loaded)
+    except RuntimeError as exc:
+        return 409, {"ok": False, "error": str(exc), "citekey": citekey}
+    return 200, {
+        "ok": True,
+        "citekey": citekey,
+        "relative_path": relative_path,
+    }
+
+
+def attachment_commit(
+    lib: Library, idx: Index, citekey: str, relative_path: str
+) -> tuple[int, dict]:
+    loaded = _load_record_response(lib, citekey)
+    if isinstance(loaded, tuple):
+        return loaded
+    try:
+        recorded = lib.set_main_attachment_path(loaded, relative_path)
+    except ValueError as exc:
+        return 400, {"ok": False, "error": str(exc), "citekey": citekey}
+    idx._upsert(loaded)
+    return 200, {
+        "ok": True,
+        "citekey": citekey,
+        "relative_path": recorded,
+    }
+
+
+def attachment_release(lib: Library, citekey: str) -> tuple[int, dict]:
+    loaded = _load_record_response(lib, citekey)
+    if isinstance(loaded, tuple):
+        return loaded
+    removed = lib.release_main_attachment_file(loaded)
+    return 200, {"ok": True, "citekey": citekey, "removed": removed}
+
+
+def main_attachment_pdf(lib: Library, citekey: str) -> tuple[int, Path | dict]:
+    loaded = _load_record_response(lib, citekey)
+    if isinstance(loaded, tuple):
+        return loaded
+    path = lib.main_attachment_file(loaded)
+    if path is None or not path.is_file():
+        return 404, {"ok": False, "error": "pdf not on server", "citekey": citekey}
+    return 200, path
+
+
 def _relation_response(idx: Index, citekey: str, relation: str) -> tuple[int, dict]:
     state = idx.graph_relation_state(citekey)
     if state is None:
@@ -376,6 +450,23 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
     _start_publication_worker(lib, db_path)
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        def _read_body(self) -> bytes:
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                length = 0
+            if length <= 0 or length > 1_000_000:
+                return b""
+            return self.rfile.read(length)
+
+        def _send_file(self, path: Path, content_type: str) -> None:
+            data = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _json(self, status: int, body: dict | list) -> None:
             response_status, headers, payload = _json_response(
                 body,
@@ -409,6 +500,12 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
                 return self._json(200, idx.publication_status())
             if parsed.path.startswith("/api/papers/"):
                 suffix = parsed.path[len("/api/papers/"):]
+                action = _attachment_action(suffix)
+                if action is not None and action[1] == "pdf":
+                    status, payload = main_attachment_pdf(lib, action[0])
+                    if isinstance(payload, dict):
+                        return self._json(status, payload)
+                    return self._send_file(payload, "application/pdf")
                 if suffix.endswith("/references"):
                     citekey = urllib.parse.unquote(suffix[:-len("/references")])
                     status, body = _relation_response(idx, citekey, "references")
@@ -425,6 +522,23 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
 
         def do_POST(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
+            if parsed.path.startswith("/api/papers/"):
+                action = _attachment_action(parsed.path[len("/api/papers/"):])
+                if action is not None:
+                    citekey, name = action
+                    if name == "attachment-plan":
+                        status, body = attachment_plan(lib, citekey)
+                        return self._json(status, body)
+                    if name == "attachment-commit":
+                        form = urllib.parse.parse_qs(self._read_body().decode())
+                        relative_path = form.get("relative_path", [""])[0]
+                        status, body = attachment_commit(
+                            lib, idx, citekey, relative_path
+                        )
+                        return self._json(status, body)
+                    if name == "attachment-release":
+                        status, body = attachment_release(lib, citekey)
+                        return self._json(status, body)
             prefix = "/api/papers/"
             suffix = "/references/retry"
             if parsed.path.startswith(prefix) and parsed.path.endswith(suffix):
