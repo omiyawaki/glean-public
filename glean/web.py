@@ -11,6 +11,11 @@ of records), independent of YAML reparse cost. A background thread
 calls Index.refresh() every REFRESH_INTERVAL_S so YAML edits show up
 in the API without per-request reparse latency. (refresh() is itself
 the expensive thing — see PARKED.md on the dual-mtime fix.)
+
+glean add commits the new row before that YAML scan runs again.
+Requests republish the list from SQLite when index.sqlite or its WAL
+changes, so a client that refetches after the commit sees the paper
+without waiting for the scan.
 """
 from __future__ import annotations
 
@@ -35,6 +40,23 @@ from glean.store import Library
 REFRESH_INTERVAL_S = 60
 
 
+def index_generation(db_path: Path) -> tuple[int, int]:
+    """mtime_ns of the database and its WAL.
+
+    Commits from ``glean add`` land in the WAL. The main database file's
+    mtime often stays put until a later checkpoint, so a generation that
+    watches only ``index.sqlite`` misses the row the writer just committed.
+    """
+
+    def mtime_ns(path: Path) -> int:
+        try:
+            return path.stat().st_mtime_ns
+        except FileNotFoundError:
+            return 0
+
+    return (mtime_ns(db_path), mtime_ns(Path(str(db_path) + "-wal")))
+
+
 def _refresh_index(idx: Index, *, phase: str) -> bool:
     try:
         idx.refresh()
@@ -42,6 +64,16 @@ def _refresh_index(idx: Index, *, phase: str) -> bool:
         print(f"glean web {phase} refresh failed: {exc}", file=sys.stderr, flush=True)
         return False
     return True
+
+
+def _read_committed_list(idx: Index) -> dict:
+    """List rows visible to a new read transaction.
+
+    The web process keeps one connection. A read left open on that
+    connection hides WAL commits from ``glean add`` until it ends.
+    """
+    idx.connect().rollback()
+    return _list_papers(idx)
 
 
 def _list_entries(idx: Index) -> list[dict]:
@@ -115,15 +147,23 @@ def _delta_for_body(current: dict, *, since: str | None) -> dict:
 
 
 class PapersSnapshot:
-    """Published /api/papers response from the last complete index refresh."""
+    """Published /api/papers response from the last complete index read.
 
-    def __init__(self, body: dict) -> None:
+    ``body()`` stays on the previous complete list while a YAML refresh
+    is upserting rows. A request can still republish from SQLite when
+    another process has committed, because that read does not observe
+    the in-progress refresh: it takes the same index lock or skips.
+    """
+
+    def __init__(self, body: dict, generation: tuple[int, int] = (0, 0)) -> None:
         self._body = body
+        self._generation = generation
         self._lock = threading.RLock()
+        self._index_lock = threading.Lock()
 
     @classmethod
     def from_index(cls, idx: Index) -> "PapersSnapshot":
-        return cls(_list_papers(idx))
+        return cls(_list_papers(idx), index_generation(idx.db_path))
 
     def body(self) -> dict:
         with self._lock:
@@ -133,20 +173,51 @@ class PapersSnapshot:
         with self._lock:
             return _delta_for_body(self._body, since=since)
 
-    def refresh_from_index(self, idx: Index, *, phase: str) -> bool:
-        refreshed = _refresh_index(idx, phase=phase)
-        try:
-            body = _list_papers(idx)
-        except Exception as exc:
-            print(
-                f"glean web {phase} snapshot publish failed: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
+    def publish_committed_index(self, idx: Index) -> bool:
+        """Republish when the database or WAL changed, without a YAML scan.
+
+        Returns False when nothing changed or a YAML refresh currently
+        owns the shared connection. Callers then serve ``body()``.
+        """
+        if not self._index_lock.acquire(blocking=False):
             return False
-        with self._lock:
-            self._body = body
-        return refreshed
+        try:
+            generation = index_generation(idx.db_path)
+            with self._lock:
+                if generation == self._generation:
+                    return False
+            try:
+                body = _read_committed_list(idx)
+            except Exception as exc:
+                print(
+                    f"glean web committed-index publish failed: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+            with self._lock:
+                self._body = body
+                self._generation = generation
+            return True
+        finally:
+            self._index_lock.release()
+
+    def refresh_from_index(self, idx: Index, *, phase: str) -> bool:
+        with self._index_lock:
+            refreshed = _refresh_index(idx, phase=phase)
+            try:
+                body = _list_papers(idx)
+            except Exception as exc:
+                print(
+                    f"glean web {phase} snapshot publish failed: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+            with self._lock:
+                self._body = body
+                self._generation = index_generation(idx.db_path)
+            return refreshed
 
 
 def _json_response(
@@ -486,8 +557,10 @@ def serve(host: str = "0.0.0.0", port: int = 8766) -> None:
                 status, body = _library_health(lib, snapshot)
                 return self._json(status, body)
             if parsed.path == "/api/papers":
+                snapshot.publish_committed_index(idx)
                 return self._json(200, snapshot.body())
             if parsed.path == "/api/papers/delta":
+                snapshot.publish_committed_index(idx)
                 query = urllib.parse.parse_qs(parsed.query)
                 since = query.get("since", [None])[0]
                 return self._json(
