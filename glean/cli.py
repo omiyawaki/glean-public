@@ -30,7 +30,17 @@ from glean.schema import (
     ReferenceGraphState, ReferenceID, TYPE_ENUM, ValidationError,
     normalize_tag, validate,
 )
-from glean.store import Library, attachment_filename
+from glean.remote_library import (
+    LOCAL_PDF_ROOT,
+    attachment_relpath,
+    delegate,
+    fetch_record_text,
+    local_attachment_path,
+    push_record_file,
+    remote_catalog_enabled,
+    should_delegate,
+)
+from glean.store import Library, attachment_filename, loads
 
 
 DEFAULT_LIBRARY_ROOT = Path("~/Documents/glean").expanduser()
@@ -112,13 +122,36 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 # ---------- open ----------
 
+def _open_remote(citekey: str, kind: str) -> int:
+    if not citekey_is_valid(citekey):
+        _err(f"not found: {citekey}")
+        return 1
+    text = fetch_record_text(citekey)
+    if text is None:
+        _err(f"not found: {citekey}")
+        return 1
+    rel = attachment_relpath(text, kind)
+    if rel is None:
+        _err(f"{citekey}: no attachment of kind {kind!r}")
+        return 1
+    path = local_attachment_path(rel)
+    if path is None or not path.exists():
+        shown = path if path is not None else rel
+        _err(f"attachment file missing: {shown}")
+        return 1
+    subprocess.run(["open", str(path)], check=False)
+    return 0
+
+
 def cmd_open(args: argparse.Namespace) -> int:
+    kind = args.kind or "main"
+    if remote_catalog_enabled():
+        return _open_remote(args.citekey, kind)
     lib = _library()
     if not lib.exists(args.citekey):
         _err(f"not found: {args.citekey}")
         return 1
     r = lib.load(args.citekey)
-    kind = args.kind or "main"
     match = next((a for a in r.attachments if a.kind == kind), None)
     if match is None:
         _err(f"{r.citekey}: no attachment of kind {kind!r}")
@@ -861,7 +894,48 @@ def cmd_backfill_pdfs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _attach_remote(args: argparse.Namespace) -> int:
+    """Put the PDF in the Mac attachment folder and the record on glean-server."""
+    citekey = args.citekey
+    if not citekey_is_valid(citekey):
+        _err(f"not found: {citekey}")
+        return 1
+    text = fetch_record_text(citekey)
+    if text is None:
+        _err(f"not found: {citekey}")
+        return 1
+    src = Path(args.path).expanduser()
+    if not src.is_file():
+        _err(f"source file not found: {src}")
+        return 2
+    record = loads(text)
+    name = _unique_attachment_name(Library(LOCAL_PDF_ROOT), record, args.kind)
+    dst = LOCAL_PDF_ROOT / "attachments" / name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    if args.move:
+        try:
+            src.unlink()
+        except OSError:
+            pass
+    record.attachments = [
+        a for a in record.attachments if a.kind != args.kind
+    ]
+    record.attachments.append(Attachment(path=f"attachments/{name}", kind=args.kind))
+    with tempfile.TemporaryDirectory() as tmp:
+        lib = Library(tmp)
+        lib.save(record)
+        rc = push_record_file(citekey, lib.path_for(citekey))
+    if rc != 0:
+        _err("failed to update the library on glean-server")
+        return 1
+    print(str(dst))
+    return 0
+
+
 def cmd_attach(args: argparse.Namespace) -> int:
+    if remote_catalog_enabled():
+        return _attach_remote(args)
     lib = _library()
     idx = _index(lib)
     idx.connect()
@@ -1440,8 +1514,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    args_list = sys.argv[1:] if argv is None else list(argv)
+    if should_delegate(args_list):
+        return delegate(args_list)
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_list)
     return args.func(args)
 
 
