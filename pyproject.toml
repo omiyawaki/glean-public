@@ -9,7 +9,7 @@ description = "CLI/TUI reference manager with a plain-text source of truth and a
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Osamu Miyawaki", email = "user@example.com" }]
+authors = [{ name = "Osamu Miyawaki" }]
 
 dependencies = [
     "ruamel.yaml>=0.18",

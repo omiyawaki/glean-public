@@ -16,7 +16,7 @@ from pathlib import Path
 from ruamel.yaml import YAML
 
 HOST = os.environ.get("GLEAN_HOST", "glean-server")
-REMOTE_RECORDS = "/srv/glean/records"
+REMOTE_RECORDS = os.environ.get("GLEAN_REMOTE_RECORDS", "/srv/glean/records")
 LOCAL_PDF_ROOT = Path("~/Documents/glean").expanduser()
 
 # These commands need a local file, a local editor, or a process on this Mac.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.conftest import requires_paper_intake
+
 from pathlib import Path
 
 import pytest
@@ -113,6 +115,7 @@ def test_openalex_returns_none_on_http_failure(cache_root):
     assert openalex.fetch("10.1/foo", http_get=lambda _: None) is None
 
 
+@requires_paper_intake
 def test_crossref_fetch_extracts_refs(cache_root):
     payload = {
         "message": {

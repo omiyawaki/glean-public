@@ -8,6 +8,8 @@ PLIST_SOURCE="$HOME/tools/glean/install/com.miyawaki.glean-web.plist"
 PLIST_DEST="$HOME/Library/LaunchAgents/com.miyawaki.glean-web.plist"
 DOMAIN="gui/$(id -u)"
 HOST="$(/usr/sbin/scutil --get LocalHostName 2>/dev/null || /bin/hostname -s)"
+# Set GLEAN_WEB_HOST to the LocalHostName of the Mac that should run the web service.
+WEB_HOST="${GLEAN_WEB_HOST:-}"
 
 command -v pixi >/dev/null || {
     echo "Pixi not found on PATH. Install it with: brew install pixi"
@@ -25,14 +27,7 @@ pixi run --manifest-path "$MANIFEST" --environment tools \
 pixi run --manifest-path "$MANIFEST" --environment tools glean --help >/dev/null
 
 case "$HOST" in
-    server) ;;
-    work)
-        launchctl bootout "$DOMAIN" "$PLIST_DEST" 2>/dev/null || true
-        launchctl disable "$DOMAIN/com.miyawaki.glean-web" 2>/dev/null || true
-        rm -f "$PLIST_DEST"
-        echo "Glean web migrated to server; stale LaunchAgent disabled."
-        exit 0
-        ;;
+    "$WEB_HOST") ;;
     *)
         echo "Glean CLI installed; no Glean web LaunchAgent role for host $HOST."
         exit 0

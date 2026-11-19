@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.conftest import requires_paper_intake
+
 import json
 import os
 import sqlite3
@@ -282,6 +284,7 @@ def test_add_duplicate_detects_doi_case_mismatch(cli_env, monkeypatch, capsys):
     assert out == "Miyawaki2024Attention"
 
 
+@requires_paper_intake
 def test_add_recreates_record_when_duplicate_index_row_is_stale(cli_env, monkeypatch, capsys):
     _patch_paper_intake(
         monkeypatch,
@@ -307,6 +310,7 @@ def test_add_recreates_record_when_duplicate_index_row_is_stale(cli_env, monkeyp
     assert cli_env.exists("Miyawaki2024Attention")
 
 
+@requires_paper_intake
 def test_add_success(cli_env, monkeypatch, capsys):
     _patch_paper_intake(
         monkeypatch,
@@ -344,6 +348,7 @@ def test_add_success(cli_env, monkeypatch, capsys):
     ).fetchone() is None
 
 
+@requires_paper_intake
 def test_add_success_fetches_and_attaches_pdf(cli_env, monkeypatch, capsys):
     from glean import _paper_intake
 
@@ -386,6 +391,7 @@ def test_add_success_fetches_and_attaches_pdf(cli_env, monkeypatch, capsys):
     assert (cli_env.root / r.attachments[0].path).read_bytes() == b"%PDF-1.4\nfake\n"
 
 
+@requires_paper_intake
 def test_add_success_queues_pdf_backlog_when_fetch_fails(cli_env, monkeypatch, capsys):
     from glean import _paper_intake
 
@@ -439,6 +445,7 @@ def test_add_success_queues_pdf_backlog_when_fetch_fails(cli_env, monkeypatch, c
     ]
 
 
+@requires_paper_intake
 def test_add_arxiv_preprint(cli_env, monkeypatch, capsys):
     _patch_paper_intake(
         monkeypatch,

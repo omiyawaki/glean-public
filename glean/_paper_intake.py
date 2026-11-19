@@ -9,11 +9,12 @@ network calls.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
-_PI_DIR = str(Path("~/tools/paper_intake").expanduser())
+_PI_DIR = str(Path(os.environ.get("PAPER_INTAKE_DIR", "~/tools/paper_intake")).expanduser())
 
 
 def _ensure_on_path() -> None:

@@ -6,6 +6,7 @@ Caches raw JSON under ~/Library/Caches/glean/openalex/<doi>.json (30-day TTL).
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import date
@@ -18,7 +19,8 @@ import httpx
 
 CACHE_ROOT = Path("~/Library/Caches/glean/openalex").expanduser()
 DEFAULT_TTL_DAYS = 30
-MAILTO = "user@example.com"
+# Crossref and OpenAlex ask for a contact address (polite pool). Set GLEAN_MAILTO.
+MAILTO = os.environ.get("GLEAN_MAILTO", "user@example.com")
 TIMEOUT = 15.0
 REQUEST_INTERVAL_SECONDS = 0.2
 

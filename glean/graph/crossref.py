@@ -6,6 +6,7 @@ Caches raw JSON under ~/Library/Caches/glean/crossref/<doi>.json (30-day TTL).
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import date
 from pathlib import Path
@@ -21,7 +22,8 @@ from glean import _paper_intake
 
 CACHE_ROOT = Path("~/Library/Caches/glean/crossref").expanduser()
 DEFAULT_TTL_DAYS = 30
-MAILTO = "user@example.com"
+# Crossref and OpenAlex ask for a contact address (polite pool). Set GLEAN_MAILTO.
+MAILTO = os.environ.get("GLEAN_MAILTO", "user@example.com")
 TIMEOUT = 15.0
 
 
